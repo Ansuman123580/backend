@@ -8,7 +8,7 @@ const SESSION_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { sessionId, nickname } = body;
+    const { sessionId, nickname, durationSeconds } = body;
 
     if (!sessionId || typeof sessionId !== "string" || sessionId.length > 100) {
       return NextResponse.json(
@@ -16,6 +16,12 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
+    const validDurationSeconds =
+      typeof durationSeconds === "number" && durationSeconds > 0 && durationSeconds <= 86400
+        ? durationSeconds
+        : 300;
+    const durationMs = validDurationSeconds * 1000;
 
     // Rate limiting: 5 creations per minute per session/IP
     const ip = req.headers.get("x-forwarded-for") || sessionId;
@@ -34,7 +40,7 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
     const serverTime = new Date();
-    const expiresAt = new Date(serverTime.getTime() + SESSION_DURATION_MS);
+    const expiresAt = new Date(serverTime.getTime() + durationMs);
 
     // If Supabase is not yet configured, provide mock server response for instant preview
     if (!supabase) {
@@ -154,6 +160,7 @@ export async function POST(req: NextRequest) {
       success: true,
       roomId: room.id,
       roomCode: room.code,
+      durationSeconds: validDurationSeconds,
       createdAt: room.created_at,
       expiresAt: room.expires_at,
       serverTime: serverTime.toISOString(),

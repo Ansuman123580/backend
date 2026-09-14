@@ -54,8 +54,11 @@ interface ChatContextType {
   peerParticipant: Participant;
   selectedTtl: number;
   setSelectedTtl: (seconds: number) => void;
+  roomLifespan: number;
+  setRoomLifespan: (seconds: number) => void;
   goToScreen: (screen: ScreenState) => void;
-  initiateCreateRoom: () => Promise<string>;
+  initiateCreateRoom: (customDurationSeconds?: number) => Promise<string>;
+  updateRoomLifespan: (seconds: number) => Promise<void>;
   enterCreatedRoom: () => void;
   joinRoom: (code: string) => Promise<boolean>;
   sendMessage: (
@@ -87,6 +90,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [sessionId, setSessionId] = useState<string>("");
   const [selectedTtl, setSelectedTtl] = useState<number>(300); // Default 5m
+  const [roomLifespan, setRoomLifespan] = useState<number>(300); // Default room lifespan 5m
 
   // Clock skew tracking (server time vs client local time)
   const clockSkewRef = useRef<number>(0);
@@ -188,65 +192,116 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // Initiate Create Room (Authoritative Backend)
-  const initiateCreateRoom = useCallback(async (): Promise<string> => {
-    playSoftClick();
-    const currentSessionId =
-      sessionId ||
-      (typeof localStorage !== "undefined"
-        ? localStorage.getItem("5min_session_id") || "temp"
-        : "temp");
+  const initiateCreateRoom = useCallback(
+    async (customDurationSeconds?: number): Promise<string> => {
+      playSoftClick();
+      const duration = customDurationSeconds || roomLifespan || 300;
+      const currentSessionId =
+        sessionId ||
+        (typeof localStorage !== "undefined"
+          ? localStorage.getItem("5min_session_id") || "temp"
+          : "temp");
 
-    try {
-      const res = await fetch("/api/rooms/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId: currentSessionId, nickname: "Host" }),
-      });
+      try {
+        const res = await fetch("/api/rooms/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: currentSessionId,
+            nickname: "Host",
+            durationSeconds: duration,
+          }),
+        });
 
-      const data = await res.json();
-      if (!data.success) {
-        triggerToast(data.message || "Failed to create room.", "warning");
+        const data = await res.json();
+        if (!data.success) {
+          triggerToast(data.message || "Failed to create room.", "warning");
+          return "";
+        }
+
+        // Compute server clock skew
+        if (data.serverTime) {
+          clockSkewRef.current = Date.now() - new Date(data.serverTime).getTime();
+        }
+
+        const expiresAtMs = new Date(data.expiresAt).getTime();
+        const createdAtMs = new Date(data.createdAt || Date.now()).getTime();
+        const actualDuration = data.durationSeconds || duration;
+        const remaining = Math.max(
+          0,
+          Math.floor((expiresAtMs - (Date.now() - clockSkewRef.current)) / 1000)
+        );
+
+        const newSession: RoomSession = {
+          roomId: data.roomId,
+          roomCode: data.roomCode,
+          createdAt: createdAtMs,
+          durationSeconds: actualDuration,
+          expiresAt: expiresAtMs,
+          participants: [selfParticipant, peerParticipant],
+          participantCount: data.participantCount || 1,
+          status: "active",
+        };
+
+        setSession(newSession);
+        setTimeRemaining(remaining || actualDuration);
+        setRoomLifespan(actualDuration);
+        setMessages([]);
+        setScreen("created");
+
+        if (typeof sessionStorage !== "undefined") {
+          sessionStorage.setItem("5min_active_room", data.roomCode);
+        }
+
+        return data.roomCode;
+      } catch {
+        triggerToast("Network error. Please try again.", "warning");
         return "";
       }
+    },
+    [sessionId, triggerToast, roomLifespan]
+  );
 
-      // Compute server clock skew
-      if (data.serverTime) {
-        clockSkewRef.current = Date.now() - new Date(data.serverTime).getTime();
-      }
+  // Update Room Lifespan
+  const updateRoomLifespan = useCallback(
+    async (seconds: number) => {
+      if (!session) return;
+      playSoftClick();
 
-      const expiresAtMs = new Date(data.expiresAt).getTime();
-      const createdAtMs = new Date(data.createdAt || Date.now()).getTime();
+      const createdAtMs = session.createdAt || Date.now();
+      const newExpiresAtMs = createdAtMs + seconds * 1000;
       const remaining = Math.max(
         0,
-        Math.floor((expiresAtMs - (Date.now() - clockSkewRef.current)) / 1000)
+        Math.floor((newExpiresAtMs - (Date.now() - clockSkewRef.current)) / 1000)
       );
 
-      const newSession: RoomSession = {
-        roomId: data.roomId,
-        roomCode: data.roomCode,
-        createdAt: createdAtMs,
-        durationSeconds: SESSION_DURATION,
-        expiresAt: expiresAtMs,
-        participants: [selfParticipant, peerParticipant],
-        participantCount: data.participantCount || 1,
-        status: "active",
-      };
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              durationSeconds: seconds,
+              expiresAt: newExpiresAtMs,
+            }
+          : null
+      );
+      setTimeRemaining(remaining);
+      setRoomLifespan(seconds);
 
-      setSession(newSession);
-      setTimeRemaining(remaining || SESSION_DURATION);
-      setMessages([]);
-      setScreen("created");
-
-      if (typeof sessionStorage !== "undefined") {
-        sessionStorage.setItem("5min_active_room", data.roomCode);
+      try {
+        await fetch(`/api/rooms/${session.roomCode}/lifespan`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: sessionId || localStorage.getItem("5min_session_id"),
+            durationSeconds: seconds,
+          }),
+        });
+      } catch {
+        // Optimistic state remains
       }
-
-      return data.roomCode;
-    } catch {
-      triggerToast("Network error. Please try again.", "warning");
-      return "";
-    }
-  }, [sessionId, triggerToast]);
+    },
+    [session, sessionId]
+  );
 
   // Enter room after viewing created code
   const enterCreatedRoom = useCallback(() => {
@@ -902,8 +957,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         peerParticipant,
         selectedTtl,
         setSelectedTtl,
+        roomLifespan,
+        setRoomLifespan,
         goToScreen,
         initiateCreateRoom,
+        updateRoomLifespan,
         enterCreatedRoom,
         joinRoom,
         sendMessage,

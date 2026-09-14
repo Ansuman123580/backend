@@ -3,17 +3,17 @@
 import React, { useState } from "react";
 import { useChat } from "@/context/ChatContext";
 import { MagneticButton } from "@/components/ui/MagneticButton";
-import { ArrowLeft, Sparkles, ShieldAlert } from "lucide-react";
+import { ArrowLeft, Sparkles, ShieldAlert, Clock } from "lucide-react";
 import { motion } from "framer-motion";
 
 export function CreateRoomView() {
-  const { initiateCreateRoom, resetToHome } = useChat();
+  const { initiateCreateRoom, resetToHome, roomLifespan, setRoomLifespan } = useChat();
   const [isGenerating, setIsGenerating] = useState(false);
 
   const handleGenerate = async () => {
     setIsGenerating(true);
     try {
-      await initiateCreateRoom();
+      await initiateCreateRoom(roomLifespan);
     } finally {
       setIsGenerating(false);
     }
@@ -55,17 +55,61 @@ export function CreateRoomView() {
             </p>
           </div>
 
-          {/* Minimal animated placeholder state */}
-          <div className="my-8 py-10 px-6 rounded-2xl bg-white/[0.02] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center">
-            <div className="w-12 h-12 rounded-2xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-zinc-500 mb-3">
-              <Sparkles className="w-5 h-5 animate-pulse text-zinc-400" />
+          {/* Ephemeral channel placeholder */}
+          <div className="my-6 py-8 px-6 rounded-2xl bg-white/[0.02] border border-dashed border-white/[0.08] flex flex-col items-center justify-center text-center">
+            <div className="w-10 h-10 rounded-2xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-zinc-500 mb-2">
+              <Sparkles className="w-4 h-4 animate-pulse text-zinc-400" />
             </div>
             <div className="font-mono text-2xl tracking-[0.3em] text-zinc-600 select-none">
               •••• - ••
             </div>
-            <span className="text-[11px] font-mono text-zinc-500 mt-2">
+            <span className="text-[11px] font-mono text-zinc-500 mt-1">
               Ready to allocate ephemeral channel
             </span>
+          </div>
+
+          {/* Lifespan Selection */}
+          <div className="mb-6 p-4 rounded-2xl bg-white/[0.025] border border-white/[0.08] backdrop-blur-md">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-1.5 text-zinc-400">
+                <Clock className="w-3.5 h-3.5 text-sky-400/90" />
+                <span className="font-mono text-xs tracking-wider text-zinc-400 uppercase">
+                  Session Lifespan
+                </span>
+              </div>
+              <span className="font-mono text-xs font-bold text-white px-2.5 py-1 rounded-lg bg-white/[0.06] border border-white/10 tracking-widest">
+                {String(Math.floor(roomLifespan / 60)).padStart(2, "0")}:
+                {String(roomLifespan % 60).padStart(2, "0")}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+              {[
+                { label: "1m", sec: 60 },
+                { label: "3m", sec: 180 },
+                { label: "5m", sec: 300 },
+                { label: "10m", sec: 600 },
+                { label: "15m", sec: 900 },
+                { label: "30m", sec: 1800 },
+                { label: "1h", sec: 3600 },
+              ].map((item) => {
+                const isSelected = roomLifespan === item.sec;
+                return (
+                  <button
+                    key={item.sec}
+                    type="button"
+                    onClick={() => setRoomLifespan(item.sec)}
+                    className={`py-1.5 px-2 rounded-xl text-xs font-mono font-medium transition-all ${
+                      isSelected
+                        ? "bg-white text-zinc-950 font-semibold shadow-[0_0_12px_rgba(255,255,255,0.2)] scale-[1.03]"
+                        : "bg-white/[0.03] text-zinc-400 hover:text-white hover:bg-white/[0.08] border border-white/[0.06]"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Trigger Button */}

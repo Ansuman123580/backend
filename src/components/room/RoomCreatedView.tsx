@@ -7,7 +7,13 @@ import { Copy, Check, ArrowRight, Clock, Share2, ArrowLeft } from "lucide-react"
 import { motion } from "framer-motion";
 
 export function RoomCreatedView() {
-  const { session, enterCreatedRoom, copyToClipboard, resetToHome } = useChat();
+  const {
+    session,
+    enterCreatedRoom,
+    copyToClipboard,
+    resetToHome,
+    updateRoomLifespan,
+  } = useChat();
   const [copied, setCopied] = useState(false);
 
   if (!session) return null;
@@ -73,15 +79,53 @@ export function RoomCreatedView() {
             </button>
           </div>
 
-          {/* 5-minute countdown teaser */}
-          <div className="flex items-center justify-center gap-2 my-5 text-zinc-400">
-            <Clock className="w-3.5 h-3.5 text-sky-400/80" />
-            <span className="font-mono text-xs tracking-wider text-zinc-400">
-              SESSION LIFESPAN:
-            </span>
-            <span className="font-mono text-xs font-semibold text-white">
-              05:00
-            </span>
+          {/* Interactive Session Lifespan Timer Selector */}
+          <div className="my-5 p-4 rounded-2xl bg-white/[0.025] border border-white/[0.08] backdrop-blur-md">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2 text-zinc-400">
+                <Clock className="w-3.5 h-3.5 text-sky-400/90" />
+                <span className="font-mono text-xs tracking-wider text-zinc-400 uppercase">
+                  SESSION LIFESPAN
+                </span>
+              </div>
+              <span className="font-mono text-xs font-bold text-white px-2.5 py-1 rounded-lg bg-white/[0.06] border border-white/10 tracking-widest">
+                {String(Math.floor((session.durationSeconds || 300) / 60)).padStart(2, "0")}:
+                {String((session.durationSeconds || 300) % 60).padStart(2, "0")}
+              </span>
+            </div>
+
+            {/* Preset Lifespan Pills */}
+            <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5">
+              {[
+                { label: "1m", sec: 60 },
+                { label: "3m", sec: 180 },
+                { label: "5m", sec: 300 },
+                { label: "10m", sec: 600 },
+                { label: "15m", sec: 900 },
+                { label: "30m", sec: 1800 },
+                { label: "1h", sec: 3600 },
+              ].map((item) => {
+                const isSelected = (session.durationSeconds || 300) === item.sec;
+                return (
+                  <button
+                    key={item.sec}
+                    type="button"
+                    onClick={() => updateRoomLifespan(item.sec)}
+                    className={`py-1.5 px-2 rounded-xl text-xs font-mono font-medium transition-all ${
+                      isSelected
+                        ? "bg-white text-zinc-950 font-semibold shadow-[0_0_12px_rgba(255,255,255,0.2)] scale-[1.03]"
+                        : "bg-white/[0.03] text-zinc-400 hover:text-white hover:bg-white/[0.08] border border-white/[0.06]"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <p className="mt-2 text-[10px] font-mono text-zinc-500 text-center">
+              Tap any duration to adjust how long this room will remain active
+            </p>
           </div>
 
           {/* Actions */}
