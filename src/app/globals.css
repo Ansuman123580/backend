@@ -131,3 +131,12 @@
   user-drag: none;
 }
 
+/* Anti-capture & selection deterrence */
+.protected-chat {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+

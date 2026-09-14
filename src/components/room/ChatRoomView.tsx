@@ -23,10 +23,14 @@ import {
   RotateCw,
   Image as ImageIcon,
   AlertTriangle,
+  Eye,
+  EyeOff,
+  ShieldAlert,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { LightboxModal } from "@/components/ui/LightboxModal";
 import { PrivacyShield } from "@/components/ui/PrivacyShield";
+import { AntiScreenshotWatermark } from "@/components/ui/AntiScreenshotWatermark";
 import { DisappearingTimerSelector } from "@/components/room/DisappearingTimerSelector";
 
 const EMOJI_OPTIONS = ["👍", "🔥", "🤫", "✨", "⏳"];
@@ -72,6 +76,21 @@ export function ChatRoomView() {
   const [activeReactionMenu, setActiveReactionMenu] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [holdToRevealImageId, setHoldToRevealImageId] = useState<string | null>(null);
+  const [stealthProtectionEnabled, setStealthProtectionEnabled] = useState(true);
+
+  // Release held reveal on any blur or mouseup anywhere
+  useEffect(() => {
+    const handleResetHold = () => setHoldToRevealImageId(null);
+    window.addEventListener("blur", handleResetHold);
+    window.addEventListener("mouseup", handleResetHold);
+    window.addEventListener("touchend", handleResetHold);
+    return () => {
+      window.removeEventListener("blur", handleResetHold);
+      window.removeEventListener("mouseup", handleResetHold);
+      window.removeEventListener("touchend", handleResetHold);
+    };
+  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -200,6 +219,12 @@ export function ChatRoomView() {
       {/* Privacy Shield on tab blur / background */}
       <PrivacyShield />
 
+      {/* Forensic Anti-Screenshot Watermark */}
+      <AntiScreenshotWatermark
+        roomCode={session?.roomCode || "5MIN"}
+        nickname={session?.participants?.find((p) => p.isSelf)?.name || "GUEST"}
+      />
+
       {/* Print protection shield banner */}
       <div className="print-shield-notice">
         🔒 5MIN: Private temporary conversation. Printing content is prohibited.
@@ -307,8 +332,30 @@ export function ChatRoomView() {
               </span>
             </div>
 
-            {/* Audio & Leave Actions */}
+            {/* Stealth Shield, Audio & Leave Actions */}
             <div className="flex items-center gap-1">
+              {/* Stealth Mode Anti-Capture Toggle */}
+              <button
+                onClick={() => setStealthProtectionEnabled(!stealthProtectionEnabled)}
+                aria-label="Toggle stealth photo protection"
+                className={`p-2 rounded-lg transition-colors ${
+                  stealthProtectionEnabled
+                    ? "text-sky-400 bg-sky-500/10 hover:bg-sky-500/20"
+                    : "text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.04]"
+                }`}
+                title={
+                  stealthProtectionEnabled
+                    ? "Stealth Shield Active: Photos blurred until pressed & held"
+                    : "Stealth Shield Inactive: Photos visible normally"
+                }
+              >
+                {stealthProtectionEnabled ? (
+                  <EyeOff className="w-4 h-4" />
+                ) : (
+                  <Eye className="w-4 h-4" />
+                )}
+              </button>
+
               <button
                 onClick={toggleSound}
                 aria-label="Toggle audio"
@@ -449,14 +496,13 @@ export function ChatRoomView() {
                       {/* Attached Image inside bubble */}
                       {msg.imageUrl && (
                         <div
-                          onClick={() =>
-                            setActiveLightboxImage({
-                              url: msg.imageUrl!,
-                              senderName: msg.senderName,
-                              timestamp: msg.timestamp,
-                            })
-                          }
-                          className="relative cursor-pointer group/img overflow-hidden bg-black/40"
+                          onMouseDown={() => setHoldToRevealImageId(msg.id)}
+                          onMouseUp={() => setHoldToRevealImageId(null)}
+                          onMouseLeave={() => setHoldToRevealImageId(null)}
+                          onTouchStart={() => setHoldToRevealImageId(msg.id)}
+                          onTouchEnd={() => setHoldToRevealImageId(null)}
+                          onContextMenu={(e) => e.preventDefault()}
+                          className="relative cursor-pointer group/img overflow-hidden bg-black/40 select-none no-drag"
                         >
                           {/* Image upload progress overlay */}
                           {msg.deliveryStatus === "sending" && (
@@ -472,14 +518,46 @@ export function ChatRoomView() {
                             src={msg.imageUrl}
                             alt="Encrypted attachment"
                             draggable={false}
-                            className="w-full max-h-72 sm:max-h-80 object-cover transition-transform duration-300 group-hover/img:scale-[1.02] pointer-events-none no-drag"
+                            className={`w-full max-h-72 sm:max-h-80 object-cover transition-all duration-300 pointer-events-none no-drag select-none ${
+                              stealthProtectionEnabled && holdToRevealImageId !== msg.id
+                                ? "filter blur-xl scale-105 brightness-50"
+                                : "filter blur-0 scale-100 brightness-100"
+                            }`}
                           />
 
-                          {/* Hover hint */}
-                          <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-lg bg-black/60 backdrop-blur-md opacity-0 group-hover/img:opacity-100 transition-opacity text-[10px] font-mono text-white flex items-center gap-1 pointer-events-none">
-                            <ImageIcon className="w-3 h-3" />
-                            <span>View</span>
-                          </div>
+                          {/* Anti-screenshot Hold-to-reveal Prompt */}
+                          {stealthProtectionEnabled && holdToRevealImageId !== msg.id && (
+                            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm p-4 text-center pointer-events-none">
+                              <div className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-white mb-2 shadow-lg">
+                                <Eye className="w-5 h-5" />
+                              </div>
+                              <span className="text-xs font-semibold text-white tracking-wide mb-0.5">
+                                Protected Photo
+                              </span>
+                              <span className="text-[10px] font-mono text-zinc-300">
+                                Press & hold to reveal
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Expand to Lightbox action when unblurred */}
+                          {(!stealthProtectionEnabled || holdToRevealImageId === msg.id) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveLightboxImage({
+                                  url: msg.imageUrl!,
+                                  senderName: msg.senderName,
+                                  timestamp: msg.timestamp,
+                                });
+                              }}
+                              className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-black/70 backdrop-blur-md text-[10px] font-mono text-white flex items-center gap-1 hover:bg-black/90 transition-colors shadow-lg"
+                            >
+                              <ImageIcon className="w-3 h-3" />
+                              <span>Expand</span>
+                            </button>
+                          )}
                         </div>
                       )}
 

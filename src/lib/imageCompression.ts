@@ -114,3 +114,4 @@ export async function compressImage(file: File): Promise<CompressionResult> {
     reader.readAsDataURL(file);
   });
 }
+

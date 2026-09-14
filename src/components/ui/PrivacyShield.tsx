@@ -10,37 +10,77 @@ interface PrivacyShieldProps {
 
 export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
   const [isMasked, setIsMasked] = useState(false);
+  const [shieldReason, setShieldReason] = useState<string>("Session Shielded");
 
   useEffect(() => {
     if (!enabled) return;
 
+    // Instant protection on visibility change (tab switch, minimize)
     const handleVisibilityChange = () => {
       if (document.hidden) {
+        setShieldReason("Session Shielded — Tab Inactive");
         setIsMasked(true);
       }
     };
 
+    // Instant protection on window blur (e.g. Snipping tool, macOS Cmd+Shift+4 overlay, app switch)
     const handleWindowBlur = () => {
-      // Short delay to avoid accidental flicker on dialogs
-      setTimeout(() => {
-        if (!document.hasFocus()) {
-          setIsMasked(true);
-        }
-      }, 150);
+      setShieldReason("Screenshot Protection Active — Focus Lost");
+      setIsMasked(true);
     };
 
     const handleWindowFocus = () => {
-      setIsMasked(false);
+      // Keep masked until explicit user tap or click to prevent snipping capture
+    };
+
+    // Keyboard shortcut interception for screenshot commands
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 1. Windows PrintScreen
+      if (e.key === "PrintScreen" || e.code === "PrintScreen") {
+        e.preventDefault();
+        setShieldReason("Screenshot Attempt Detected — Content Hidden");
+        setIsMasked(true);
+        // Overwrite clipboard if possible
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText("5MIN: Private temporary content protected against screenshots.").catch(() => {});
+        }
+        return;
+      }
+
+      // 2. Mac (Cmd + Shift + 3/4/5) and Windows (Win/Ctrl + Shift + S)
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey) {
+        setShieldReason("Screen Capture Shortcut Detected");
+        setIsMasked(true);
+      }
+
+      // 3. Print dialog (Cmd+P, Ctrl+P)
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setShieldReason("Printing Prohibited");
+        setIsMasked(true);
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "PrintScreen" || e.code === "PrintScreen") {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText("").catch(() => {});
+        }
+      }
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
     };
   }, [enabled]);
 
@@ -53,7 +93,7 @@ export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
           exit={{ opacity: 0 }}
           transition={{ duration: 0.2 }}
           onClick={() => setIsMasked(false)}
-          className="fixed inset-0 z-40 flex flex-col items-center justify-center p-6 bg-[#060709]/95 backdrop-blur-3xl cursor-pointer select-none"
+          className="fixed inset-0 z-[99999] flex flex-col items-center justify-center p-6 bg-[#040507]/98 backdrop-blur-3xl cursor-pointer select-none"
         >
           <motion.div
             initial={{ scale: 0.94, opacity: 0 }}
@@ -69,15 +109,15 @@ export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
               Privacy Guard Active
             </span>
             <h2 className="text-2xl font-semibold tracking-tight text-white mb-2">
-              Session Shielded
+              {shieldReason}
             </h2>
             <p className="text-xs text-zinc-400 font-light leading-relaxed mb-6">
-              Private room content is automatically masked while the tab is out of focus. Click anywhere to resume.
+              Private room messages and media are shielded from external screen capture. Click anywhere or tap to return.
             </p>
 
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.04] border border-white/[0.08] text-[11px] font-mono text-zinc-300">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Tap to reveal session</span>
+            <div className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white/[0.06] border border-white/[0.12] text-xs font-mono text-zinc-200 shadow-lg hover:bg-white/10 transition-colors">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>Click to reveal conversation</span>
             </div>
           </motion.div>
         </motion.div>
@@ -85,3 +125,4 @@ export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
     </AnimatePresence>
   );
 }
+
