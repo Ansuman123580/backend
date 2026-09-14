@@ -8,9 +8,13 @@ alter table public.rooms add constraint rooms_participant_count_check check (par
 
 -- 2. Add granular expiration defaults and invite revocation flags to rooms
 alter table if exists public.rooms
+  add column if not exists max_participants integer default 2,
+  add column if not exists allow_images boolean default true,
+  add column if not exists allow_reactions boolean default true,
+  add column if not exists allow_replies boolean default true,
+  add column if not exists allow_view_once boolean default true,
   add column if not exists default_message_ttl integer default 300,
   add column if not exists default_photo_ttl integer default 300,
-  add column if not exists allow_view_once boolean default true,
   add column if not exists is_invite_revoked boolean default false;
 
 -- 3. Add read receipt fields to messages
@@ -220,3 +224,4 @@ begin
   return jsonb_build_object('success', true, 'room_id', p_room_id);
 end;
 $$;
+
