@@ -15,6 +15,7 @@ import {
   Message,
   Participant,
   ToastMessage,
+  DeliveryStatus,
 } from "@/types/chat";
 import { isValidRoomCodeFormat } from "@/lib/roomCode";
 import {
@@ -26,6 +27,7 @@ import {
   setSoundMuted,
 } from "@/lib/sound";
 import { getSupabaseClient } from "@/lib/supabase/client";
+import { compressImage } from "@/lib/imageCompression";
 
 const SESSION_DURATION = 300; // 5 minutes in seconds
 
@@ -33,7 +35,7 @@ const INITIAL_PEER_RESPONSES = [
   "Connected. This room disappears in 5 minutes.",
   "Quick question: are we aligned on the private release date?",
   "Understood. Let's keep this completely off-the-record.",
-  "Perfect. I'll delete my local notes too once this expires.",
+  "Photo received. Beautiful clarity.",
   "Time is ticking — 5MIN makes sure nothing remains.",
   "Got it. Talk to you soon.",
 ];
@@ -50,11 +52,18 @@ interface ChatContextType {
   isCriticalExpiring: boolean;
   selfParticipant: Participant;
   peerParticipant: Participant;
+  selectedTtl: number;
+  setSelectedTtl: (seconds: number) => void;
   goToScreen: (screen: ScreenState) => void;
   initiateCreateRoom: () => Promise<string>;
   enterCreatedRoom: () => void;
   joinRoom: (code: string) => Promise<boolean>;
-  sendMessage: (content: string, replyTo?: Message["replyTo"]) => Promise<void>;
+  sendMessage: (
+    content: string,
+    replyTo?: Message["replyTo"],
+    imageFile?: File
+  ) => Promise<void>;
+  retrySendMessage: (messageId: string) => Promise<void>;
   addReaction: (messageId: string, emoji: string) => void;
   copyToClipboard: (text: string, label?: string) => Promise<void>;
   leaveRoom: () => void;
@@ -77,6 +86,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [sessionId, setSessionId] = useState<string>("");
+  const [selectedTtl, setSelectedTtl] = useState<number>(300); // Default 5m
 
   // Clock skew tracking (server time vs client local time)
   const clockSkewRef = useRef<number>(0);
@@ -94,7 +104,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     try {
       let stored = localStorage.getItem("5min_session_id");
       if (!stored) {
-        stored = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `sess_${Date.now()}_${Math.random()}`;
+        stored =
+          typeof crypto !== "undefined" && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `sess_${Date.now()}_${Math.random()}`;
         localStorage.setItem("5min_session_id", stored);
       }
       setSessionId(stored);
@@ -224,7 +237,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setMessages([]);
       setScreen("created");
 
-      // Save to sessionStorage for refresh resilience
       if (typeof sessionStorage !== "undefined") {
         sessionStorage.setItem("5min_active_room", data.roomCode);
       }
@@ -244,14 +256,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     setScreen("chat");
     playSoftClick();
 
-    // Initial greeting
     setMessages([
       {
         id: `sys-${Date.now()}`,
         senderId: "system",
         senderName: "5MIN",
         isSelf: false,
-        content: "Room activated. All messages disappear when the 5-minute timer expires.",
+        content: "Room activated. Private channel with end-of-session auto-dissolve.",
         timestamp: Date.now(),
       },
     ]);
@@ -300,7 +311,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           return false;
         }
 
-        // Server clock skew
         if (data.serverTime) {
           clockSkewRef.current = Date.now() - new Date(data.serverTime).getTime();
         }
@@ -331,7 +341,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             senderId: "system",
             senderName: "5MIN",
             isSelf: false,
-            content: `Connected to room ${formatted}. Session active for 5 minutes.`,
+            content: `Connected to room ${formatted}. Session active.`,
             timestamp: Date.now(),
           },
         ]);
@@ -351,29 +361,105 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [sessionId, triggerToast]
   );
 
-  // Send Message (Authoritative Backend & Realtime)
+  // Send Message with Image Compression & Per-Message TTL
   const sendMessage = useCallback(
-    async (content: string, replyTo?: Message["replyTo"]) => {
+    async (
+      content: string,
+      replyTo?: Message["replyTo"],
+      imageFile?: File
+    ) => {
       const trimmed = content.trim();
-      if (!trimmed || !session) return;
+      if (!trimmed && !imageFile) return;
+      if (!session) return;
 
       const currentSessionId = sessionId || "user-self";
       const optimisticId = `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const messageExpiresAt = Date.now() + selectedTtl * 1000;
 
-      const userMessage: Message = {
-        id: optimisticId,
-        senderId: currentSessionId,
-        senderName: "You",
-        isSelf: true,
-        content: trimmed,
-        timestamp: Date.now(),
-        replyTo,
-      };
+      let previewUrl: string | undefined;
+      let finalImageUrl: string | undefined;
+      let finalImagePath: string | undefined;
 
-      // Optimistic append
-      setMessages((prev) => [...prev, userMessage]);
-      playSendMessageSound();
+      // Handle Image Compression & Optimistic State
+      if (imageFile) {
+        try {
+          const compressed = await compressImage(imageFile);
+          previewUrl = compressed.previewUrl;
 
+          const optimisticMessage: Message = {
+            id: optimisticId,
+            senderId: currentSessionId,
+            senderName: "You",
+            isSelf: true,
+            content: trimmed,
+            imageUrl: previewUrl,
+            expiresAt: messageExpiresAt,
+            ttlSeconds: selectedTtl,
+            deliveryStatus: "sending",
+            uploadProgress: 35,
+            timestamp: Date.now(),
+            replyTo,
+          };
+
+          setMessages((prev) => [...prev, optimisticMessage]);
+          playSendMessageSound();
+
+          // Upload image to backend
+          const formData = new FormData();
+          formData.append("file", compressed.file);
+          formData.append("sessionId", currentSessionId);
+
+          const uploadRes = await fetch(`/api/rooms/${session.roomCode}/upload`, {
+            method: "POST",
+            body: formData,
+          });
+
+          const uploadData = await uploadRes.json();
+          if (!uploadData.success) {
+            triggerToast(uploadData.message || "Image upload failed.", "warning");
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
+              )
+            );
+            return;
+          }
+
+          finalImageUrl = uploadData.imageUrl;
+          finalImagePath = uploadData.imagePath;
+
+          // Update progress
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId
+                ? { ...m, uploadProgress: 100, imageUrl: finalImageUrl, imagePath: finalImagePath }
+                : m
+            )
+          );
+        } catch (err: any) {
+          triggerToast(err.message || "Failed to process image.", "warning");
+          return;
+        }
+      } else {
+        // Plain text message
+        const optimisticMessage: Message = {
+          id: optimisticId,
+          senderId: currentSessionId,
+          senderName: "You",
+          isSelf: true,
+          content: trimmed,
+          expiresAt: messageExpiresAt,
+          ttlSeconds: selectedTtl,
+          deliveryStatus: "sending",
+          timestamp: Date.now(),
+          replyTo,
+        };
+
+        setMessages((prev) => [...prev, optimisticMessage]);
+        playSendMessageSound();
+      }
+
+      // Post message metadata to backend
       try {
         const res = await fetch(`/api/rooms/${session.roomCode}/message`, {
           method: "POST",
@@ -382,6 +468,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             sessionId: currentSessionId,
             senderName: "You",
             content: trimmed,
+            imageUrl: finalImageUrl,
+            imagePath: finalImagePath,
+            ttlSeconds: selectedTtl,
             replyTo,
           }),
         });
@@ -389,24 +478,45 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         if (!data.success) {
           if (data.error === "ROOM_EXPIRED") {
-            triggerToast("Room has expired. Message could not be sent.", "warning");
+            triggerToast("Room has expired.", "warning");
             setScreen("expired");
           } else {
             triggerToast(data.message || "Failed to send message.", "warning");
           }
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
+            )
+          );
           return;
         }
 
-        // If in offline mock mode (no Supabase configured), simulate peer response as fallback
+        // Successfully sent
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === optimisticId
+              ? {
+                  ...m,
+                  id: data.message?.id || optimisticId,
+                  deliveryStatus: "sent",
+                  expiresAt: data.message?.expiresAt
+                    ? new Date(data.message.expiresAt).getTime()
+                    : messageExpiresAt,
+                }
+              : m
+          )
+        );
+
+        // Offline mock response fallback
         if (data.mode === "offline_mock") {
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
           if (replyTimeoutRef.current) clearTimeout(replyTimeoutRef.current);
 
-          const typingDelay = 1200 + Math.random() * 1000;
+          const typingDelay = 1000 + Math.random() * 800;
           typingTimeoutRef.current = setTimeout(() => {
             setIsTyping(true);
 
-            const responseDelay = 1800 + Math.random() * 1000;
+            const responseDelay = 1500 + Math.random() * 900;
             replyTimeoutRef.current = setTimeout(() => {
               setIsTyping(false);
 
@@ -422,6 +532,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
                 senderName: "Guest",
                 isSelf: false,
                 content: responseText,
+                expiresAt: Date.now() + selectedTtl * 1000,
+                ttlSeconds: selectedTtl,
+                deliveryStatus: "delivered",
                 timestamp: Date.now(),
               };
 
@@ -432,9 +545,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         }
       } catch {
         triggerToast("Failed to send message.", "warning");
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
+          )
+        );
       }
     },
-    [session, sessionId, triggerToast]
+    [session, sessionId, selectedTtl, triggerToast]
+  );
+
+  // Retry a failed message
+  const retrySendMessage = useCallback(
+    async (messageId: string) => {
+      const msg = messages.find((m) => m.id === messageId);
+      if (!msg) return;
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, deliveryStatus: "sending" } : m
+        )
+      );
+
+      await sendMessage(msg.content, msg.replyTo);
+    },
+    [messages, sendMessage]
   );
 
   // Broadcast typing indicator
@@ -451,57 +586,60 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   );
 
   // Add Reaction
-  const addReaction = useCallback((messageId: string, emoji: string) => {
-    setMessages((prev) =>
-      prev.map((msg) => {
-        if (msg.id !== messageId) return msg;
+  const addReaction = useCallback(
+    (messageId: string, emoji: string) => {
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (msg.id !== messageId) return msg;
 
-        const currentReactions = msg.reactions || [];
-        const existingIdx = currentReactions.findIndex((r) => r.emoji === emoji);
+          const currentReactions = msg.reactions || [];
+          const existingIdx = currentReactions.findIndex((r) => r.emoji === emoji);
 
-        let updatedReactions;
-        if (existingIdx >= 0) {
-          const existing = currentReactions[existingIdx];
-          const hasUser = existing.users.includes(sessionId || "user-self");
-          if (hasUser) {
-            const newUsers = existing.users.filter((u) => u !== (sessionId || "user-self"));
-            if (newUsers.length === 0) {
-              updatedReactions = currentReactions.filter((r) => r.emoji !== emoji);
+          let updatedReactions;
+          if (existingIdx >= 0) {
+            const existing = currentReactions[existingIdx];
+            const hasUser = existing.users.includes(sessionId || "user-self");
+            if (hasUser) {
+              const newUsers = existing.users.filter((u) => u !== (sessionId || "user-self"));
+              if (newUsers.length === 0) {
+                updatedReactions = currentReactions.filter((r) => r.emoji !== emoji);
+              } else {
+                updatedReactions = [...currentReactions];
+                updatedReactions[existingIdx] = {
+                  ...existing,
+                  count: existing.count - 1,
+                  users: newUsers,
+                };
+              }
             } else {
               updatedReactions = [...currentReactions];
               updatedReactions[existingIdx] = {
                 ...existing,
-                count: existing.count - 1,
-                users: newUsers,
+                count: existing.count + 1,
+                users: [...existing.users, sessionId || "user-self"],
               };
             }
           } else {
-            updatedReactions = [...currentReactions];
-            updatedReactions[existingIdx] = {
-              ...existing,
-              count: existing.count + 1,
-              users: [...existing.users, sessionId || "user-self"],
-            };
+            updatedReactions = [
+              ...currentReactions,
+              {
+                emoji,
+                count: 1,
+                users: [sessionId || "user-self"],
+              },
+            ];
           }
-        } else {
-          updatedReactions = [
-            ...currentReactions,
-            {
-              emoji,
-              count: 1,
-              users: [sessionId || "user-self"],
-            },
-          ];
-        }
 
-        return {
-          ...msg,
-          reactions: updatedReactions,
-        };
-      })
-    );
-    playSoftClick();
-  }, [sessionId]);
+          return {
+            ...msg,
+            reactions: updatedReactions,
+          };
+        })
+      );
+      playSoftClick();
+    },
+    [sessionId]
+  );
 
   // Leave room
   const leaveRoom = useCallback(() => {
@@ -540,7 +678,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     initiateCreateRoom();
   }, [cleanupRealtime, initiateCreateRoom]);
 
-  // Supabase Realtime Subscription Setup
+  // Supabase Realtime Subscription Setup (INSERT, DELETE, status updates)
   useEffect(() => {
     if (screen !== "chat" || !session) {
       cleanupRealtime();
@@ -571,7 +709,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         if (!newMsg) return;
 
         const isFromSelf = newMsg.sender_session_id === sessionId;
-        if (isFromSelf) return; // already added optimistically
+        if (isFromSelf) {
+          // Mark deliveryStatus as delivered
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === newMsg.id || m.content === newMsg.content
+                ? { ...m, deliveryStatus: "delivered" }
+                : m
+            )
+          );
+          return;
+        }
 
         const incomingMessage: Message = {
           id: newMsg.id,
@@ -579,6 +727,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           senderName: newMsg.sender_name || "Guest",
           isSelf: false,
           content: newMsg.content,
+          imageUrl: newMsg.image_url,
+          imagePath: newMsg.image_path,
+          ttlSeconds: newMsg.ttl_seconds,
+          expiresAt: newMsg.expires_at ? new Date(newMsg.expires_at).getTime() : undefined,
+          deliveryStatus: "delivered",
           timestamp: new Date(newMsg.created_at).getTime(),
           replyTo: newMsg.reply_to,
         };
@@ -591,14 +744,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     );
 
-    // 2. Listen for broadcast typing indicator
+    // 2. Listen for deleted messages (Real-time expiration)
+    channel.on(
+      "postgres_changes",
+      {
+        event: "DELETE",
+        schema: "public",
+        table: "messages",
+        filter: session.roomId ? `room_id=eq.${session.roomId}` : undefined,
+      },
+      (payload: any) => {
+        const oldId = payload.old?.id;
+        if (oldId) {
+          setMessages((prev) => prev.filter((m) => m.id !== oldId));
+        }
+      }
+    );
+
+    // 3. Listen for broadcast typing indicator
     channel.on("broadcast", { event: "typing" }, (payload: any) => {
       if (payload.payload?.sessionId !== sessionId) {
         setIsTyping(Boolean(payload.payload?.isTyping));
       }
     });
 
-    // 3. Listen for room status updates (e.g. expired)
+    // 4. Listen for room status updates (e.g. expired)
     channel.on(
       "postgres_changes",
       {
@@ -624,7 +794,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     };
   }, [screen, session, sessionId, cleanupRealtime]);
 
-  // Authoritative Countdown Timer System
+  // Authoritative Room Countdown Timer System
   useEffect(() => {
     if (screen !== "chat" || !session) return;
 
@@ -655,6 +825,24 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     return () => clearInterval(timer);
   }, [screen, session, triggerToast, cleanupRealtime]);
+
+  // Per-Message Disappearing Countdown Ticker
+  useEffect(() => {
+    if (screen !== "chat") return;
+
+    const msgTimer = setInterval(() => {
+      const now = Date.now() - clockSkewRef.current;
+      setMessages((prev) => {
+        const active = prev.filter((m) => !m.expiresAt || m.expiresAt > now);
+        if (active.length !== prev.length) {
+          return active;
+        }
+        return prev;
+      });
+    }, 1000);
+
+    return () => clearInterval(msgTimer);
+  }, [screen]);
 
   // Reconnection / Sync handling on tab focus or network recovery
   useEffect(() => {
@@ -712,11 +900,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         isCriticalExpiring,
         selfParticipant,
         peerParticipant,
+        selectedTtl,
+        setSelectedTtl,
         goToScreen,
         initiateCreateRoom,
         enterCreatedRoom,
         joinRoom,
         sendMessage,
+        retrySendMessage,
         addReaction,
         copyToClipboard,
         leaveRoom,

@@ -94,3 +94,40 @@
   }
 }
 
+/* Privacy & Print Deterrence */
+@media print {
+  body {
+    background: #000000 !important;
+    color: #ffffff !important;
+  }
+
+  .private-chat-content,
+  .message-feed-container,
+  .composer-container {
+    display: none !important;
+    visibility: hidden !important;
+  }
+
+  .print-shield-notice {
+    display: block !important;
+    padding: 100px 20px !important;
+    text-align: center !important;
+    font-family: monospace !important;
+    font-size: 14pt !important;
+    color: #888888 !important;
+  }
+}
+
+.print-shield-notice {
+  display: none;
+}
+
+/* Anti-drag & protected media */
+.no-drag {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+}
+

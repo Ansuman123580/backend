@@ -21,6 +21,8 @@ export interface MessageReaction {
   users: string[]; // participant ids
 }
 
+export type DeliveryStatus = "sending" | "sent" | "delivered" | "failed";
+
 export interface Message {
   id: string;
   senderId: string;
@@ -28,6 +30,12 @@ export interface Message {
   isSelf: boolean;
   content: string;
   timestamp: number;
+  imageUrl?: string;
+  imagePath?: string;
+  expiresAt?: number;
+  ttlSeconds?: number;
+  deliveryStatus?: DeliveryStatus;
+  uploadProgress?: number;
   replyTo?: {
     id: string;
     senderName: string;

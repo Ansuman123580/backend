@@ -71,13 +71,28 @@ export async function GET(
       Math.floor((expiresAtDate.getTime() - serverTime.getTime()) / 1000)
     );
 
-    // Fetch recent messages for this room
-    const { data: messages } = await supabase
+    // Fetch recent active messages for this room that have not passed their expires_at
+    let messageList: any[] = [];
+    const fullMsgResult = await supabase
       .from("messages")
-      .select("id, room_id, sender_session_id, sender_name, content, reply_to, reactions, created_at, expires_at")
+      .select("id, room_id, sender_session_id, sender_name, content, image_url, image_path, ttl_seconds, reply_to, reactions, created_at, expires_at")
       .eq("room_id", room.id)
+      .gt("expires_at", serverTime.toISOString())
       .order("created_at", { ascending: true })
       .limit(100);
+
+    if (fullMsgResult.error) {
+      // Fallback to base columns if migration 2 has not run yet in Supabase
+      const baseResult = await supabase
+        .from("messages")
+        .select("id, room_id, sender_session_id, sender_name, content, reply_to, reactions, created_at")
+        .eq("room_id", room.id)
+        .order("created_at", { ascending: true })
+        .limit(100);
+      messageList = baseResult.data || [];
+    } else {
+      messageList = fullMsgResult.data || [];
+    }
 
     return NextResponse.json({
       success: true,
@@ -88,16 +103,26 @@ export async function GET(
       expiresAt: room.expires_at,
       timeRemainingSeconds: remainingSeconds,
       participantCount: room.participant_count,
-      messages: (messages || []).map((m) => ({
-        id: m.id,
-        senderId: m.sender_session_id,
-        senderName: m.sender_name,
-        isSelf: sessionId ? m.sender_session_id === sessionId : false,
-        content: m.content,
-        timestamp: new Date(m.created_at).getTime(),
-        replyTo: m.reply_to,
-        reactions: m.reactions,
-      })),
+      messages: messageList.map((m) => {
+        const createdAtMs = new Date(m.created_at).getTime();
+        const expiresAtMs = m.expires_at
+          ? new Date(m.expires_at).getTime()
+          : createdAtMs + (m.ttl_seconds ? m.ttl_seconds * 1000 : 300000);
+        return {
+          id: m.id,
+          senderId: m.sender_session_id,
+          senderName: m.sender_name,
+          isSelf: sessionId ? m.sender_session_id === sessionId : false,
+          content: m.content,
+          imageUrl: m.image_url || null,
+          imagePath: m.image_path || null,
+          ttlSeconds: m.ttl_seconds || 300,
+          expiresAt: expiresAtMs,
+          timestamp: createdAtMs,
+          replyTo: m.reply_to,
+          reactions: m.reactions,
+        };
+      }),
       mode: "supabase",
     });
   } catch (err) {

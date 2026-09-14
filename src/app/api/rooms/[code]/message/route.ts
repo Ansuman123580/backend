@@ -11,7 +11,7 @@ export async function POST(
   try {
     const { code } = params;
     const body = await req.json().catch(() => ({}));
-    const { sessionId, senderName, content, replyTo } = body;
+    const { sessionId, senderName, content, replyTo, imageUrl, imagePath, ttlSeconds } = body;
 
     if (!sessionId || typeof sessionId !== "string") {
       return NextResponse.json(
@@ -20,17 +20,11 @@ export async function POST(
       );
     }
 
-    if (!content || typeof content !== "string") {
-      return NextResponse.json(
-        { success: false, error: "EMPTY_MESSAGE", message: "Message content cannot be empty." },
-        { status: 400 }
-      );
-    }
+    const trimmed = typeof content === "string" ? content.trim() : "";
 
-    const trimmed = content.trim();
-    if (trimmed.length === 0) {
+    if (!trimmed && !imageUrl) {
       return NextResponse.json(
-        { success: false, error: "EMPTY_MESSAGE", message: "Message content cannot be empty." },
+        { success: false, error: "EMPTY_MESSAGE", message: "Message content or photo is required." },
         { status: 400 }
       );
     }
@@ -62,6 +56,8 @@ export async function POST(
 
     const supabase = getSupabaseAdmin();
     const serverTime = new Date();
+    const selectedTtl = typeof ttlSeconds === "number" && ttlSeconds > 0 ? ttlSeconds : 300;
+    const computedExpiresAt = new Date(serverTime.getTime() + selectedTtl * 1000);
 
     if (!supabase) {
       // Mock mode for local preview
@@ -73,9 +69,12 @@ export async function POST(
           senderSessionId: sessionId,
           senderName: senderName || "You",
           content: trimmed,
+          imageUrl: imageUrl || null,
+          imagePath: imagePath || null,
+          ttlSeconds: selectedTtl,
           replyTo: replyTo || null,
           createdAt: serverTime.toISOString(),
-          expiresAt: new Date(serverTime.getTime() + 5 * 60 * 1000).toISOString(),
+          expiresAt: computedExpiresAt.toISOString(),
         },
         mode: "offline_mock",
       });
@@ -100,9 +99,12 @@ export async function POST(
             senderSessionId: sessionId,
             senderName: senderName || "You",
             content: trimmed,
+            imageUrl: imageUrl || null,
+            imagePath: imagePath || null,
+            ttlSeconds: selectedTtl,
             replyTo: replyTo || null,
             createdAt: serverTime.toISOString(),
-            expiresAt: new Date(serverTime.getTime() + 5 * 60 * 1000).toISOString(),
+            expiresAt: computedExpiresAt.toISOString(),
           },
           mode: "offline_mock",
         });
@@ -138,25 +140,56 @@ export async function POST(
     }
 
     // 3. Insert message into messages table
-    const { data: insertedMessage, error: insertErr } = await supabase
+    let insertedMessage: any = null;
+
+    const fullInsert = await supabase
       .from("messages")
       .insert({
         room_id: room.id,
         sender_session_id: sessionId,
         sender_name: participant.nickname || senderName || "Guest",
-        content: trimmed,
+        content: trimmed || (imageUrl ? "[Photo]" : ""),
+        image_url: imageUrl || null,
+        image_path: imagePath || null,
+        ttl_seconds: selectedTtl,
         reply_to: replyTo || null,
         created_at: serverTime.toISOString(),
-        expires_at: room.expires_at,
+        expires_at: computedExpiresAt.toISOString(),
       })
       .select()
       .single();
 
-    if (insertErr || !insertedMessage) {
-      return NextResponse.json(
-        { success: false, error: "DATABASE_ERROR", message: "Failed to store message." },
-        { status: 500 }
-      );
+    if (fullInsert.error) {
+      // Graceful fallback to base columns if migration 2 columns are not yet added in Supabase
+      const fallbackInsert = await supabase
+        .from("messages")
+        .insert({
+          room_id: room.id,
+          sender_session_id: sessionId,
+          sender_name: participant.nickname || senderName || "Guest",
+          content: trimmed || (imageUrl ? "[Photo]" : ""),
+          reply_to: replyTo || null,
+          created_at: serverTime.toISOString(),
+        })
+        .select()
+        .single();
+
+      if (fallbackInsert.error || !fallbackInsert.data) {
+        return NextResponse.json(
+          { success: false, error: "DATABASE_ERROR", message: "Failed to store message." },
+          { status: 500 }
+        );
+      }
+
+      insertedMessage = {
+        ...fallbackInsert.data,
+        image_url: imageUrl || null,
+        image_path: imagePath || null,
+        ttl_seconds: selectedTtl,
+        expires_at: computedExpiresAt.toISOString(),
+      };
+    } else {
+      insertedMessage = fullInsert.data;
     }
 
     return NextResponse.json({
@@ -167,6 +200,9 @@ export async function POST(
         senderSessionId: insertedMessage.sender_session_id,
         senderName: insertedMessage.sender_name,
         content: insertedMessage.content,
+        imageUrl: insertedMessage.image_url,
+        imagePath: insertedMessage.image_path,
+        ttlSeconds: insertedMessage.ttl_seconds,
         replyTo: insertedMessage.reply_to,
         createdAt: insertedMessage.created_at,
         expiresAt: insertedMessage.expires_at,
@@ -184,6 +220,9 @@ export async function POST(
           senderSessionId: "offline-user",
           senderName: "You",
           content: "Message sent",
+          imageUrl: null,
+          imagePath: null,
+          ttlSeconds: 300,
           replyTo: null,
           createdAt: serverTime.toISOString(),
           expiresAt: new Date(serverTime.getTime() + 5 * 60 * 1000).toISOString(),
@@ -197,4 +236,3 @@ export async function POST(
     );
   }
 }
-

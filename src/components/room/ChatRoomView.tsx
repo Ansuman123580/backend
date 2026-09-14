@@ -12,14 +12,22 @@ import {
   Smile,
   Paperclip,
   Check,
+  CheckCheck,
   CornerDownRight,
   X,
   Sparkles,
   Shield,
   Volume2,
   VolumeX,
+  Clock,
+  RotateCw,
+  Image as ImageIcon,
+  AlertTriangle,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { LightboxModal } from "@/components/ui/LightboxModal";
+import { PrivacyShield } from "@/components/ui/PrivacyShield";
+import { DisappearingTimerSelector } from "@/components/room/DisappearingTimerSelector";
 
 const EMOJI_OPTIONS = ["👍", "🔥", "🤫", "✨", "⏳"];
 
@@ -30,6 +38,7 @@ export function ChatRoomView() {
     messages,
     isTyping,
     sendMessage,
+    retrySendMessage,
     addReaction,
     copyToClipboard,
     leaveRoom,
@@ -38,29 +47,40 @@ export function ChatRoomView() {
     soundEnabled,
     toggleSound,
     broadcastTyping,
+    selectedTtl,
+    setSelectedTtl,
+    triggerToast,
   } = useChat();
 
   const typingDebounceRef = useRef<NodeJS.Timeout | null>(null);
 
   const [inputVal, setInputVal] = useState("");
+  const [selectedImageFile, setSelectedImageFile] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [activeLightboxImage, setActiveLightboxImage] = useState<{
+    url: string;
+    senderName: string;
+    timestamp: number;
+  } | null>(null);
+
   const [replyingTo, setReplyingTo] = useState<{
     id: string;
     senderName: string;
     content: string;
   } | null>(null);
-  const [activeReactionMenu, setActiveReactionMenu] = useState<string | null>(
-    null
-  );
+
+  const [activeReactionMenu, setActiveReactionMenu] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Auto-scroll to bottom on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping]);
+  }, [messages, isTyping, imagePreviewUrl]);
 
   // Handle auto-expanding textarea
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -92,14 +112,51 @@ export function ChatRoomView() {
     }
   };
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (!file.type.startsWith("image/")) {
+        triggerToast("Please select an image (JPG, PNG, WEBP).", "warning");
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        triggerToast("Image file size exceeds 10MB.", "warning");
+        return;
+      }
+      setSelectedImageFile(file);
+      setImagePreviewUrl(URL.createObjectURL(file));
+      triggerToast("Photo ready to send", "info");
+    }
+  };
+
+  const handleRemoveSelectedImage = () => {
+    setSelectedImageFile(null);
+    if (imagePreviewUrl) {
+      URL.revokeObjectURL(imagePreviewUrl);
+      setImagePreviewUrl(null);
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
   const handleSend = () => {
-    if (!inputVal.trim()) return;
+    if (!inputVal.trim() && !selectedImageFile) return;
+
     broadcastTyping(false);
     if (typingDebounceRef.current) clearTimeout(typingDebounceRef.current);
-    sendMessage(inputVal, replyingTo || undefined);
+
+    sendMessage(
+      inputVal,
+      replyingTo || undefined,
+      selectedImageFile || undefined
+    );
+
     setInputVal("");
+    handleRemoveSelectedImage();
     setReplyingTo(null);
     setShowEmojiPicker(false);
+
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -118,6 +175,13 @@ export function ChatRoomView() {
     textareaRef.current?.focus();
   };
 
+  const getMessageTimeRemaining = (expiresAt?: number) => {
+    if (!expiresAt) return null;
+    const diff = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+    if (diff < 60) return `${diff}s`;
+    return `${Math.ceil(diff / 60)}m`;
+  };
+
   // Timer Progress Math: 300 seconds total
   const totalSeconds = 300;
   const progressRatio = Math.max(0, timeRemaining / totalSeconds);
@@ -125,7 +189,7 @@ export function ChatRoomView() {
 
   return (
     <div
-      className={`min-h-screen flex flex-col justify-between transition-colors duration-1000 ${
+      className={`min-h-screen flex flex-col justify-between transition-colors duration-1000 select-none ${
         isCriticalExpiring
           ? "bg-[#040506]"
           : isExpiringSoon
@@ -133,6 +197,14 @@ export function ChatRoomView() {
           : "bg-background"
       }`}
     >
+      {/* Privacy Shield on tab blur / background */}
+      <PrivacyShield />
+
+      {/* Print protection shield banner */}
+      <div className="print-shield-notice">
+        🔒 5MIN: Private temporary conversation. Printing content is prohibited.
+      </div>
+
       {/* Expiring atmospheric tension vignette */}
       <div
         className={`pointer-events-none fixed inset-0 z-30 transition-opacity duration-1000 ${
@@ -171,7 +243,7 @@ export function ChatRoomView() {
           </div>
 
           {/* Room Code Badge & Timer Center/Right */}
-          <div className="flex items-center gap-3 sm:gap-6">
+          <div className="flex items-center gap-2 sm:gap-5">
             {/* Room Code Pill */}
             {session && (
               <button
@@ -193,7 +265,7 @@ export function ChatRoomView() {
 
             {/* Circular Progress Timer */}
             <div
-              className={`flex items-center gap-2.5 px-3 py-1.5 rounded-xl border backdrop-blur-md transition-colors ${
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border backdrop-blur-md transition-colors ${
                 isCriticalExpiring
                   ? "bg-red-500/10 border-red-500/30 text-red-300 shadow-[0_0_20px_rgba(239,68,68,0.2)]"
                   : isExpiringSoon
@@ -235,7 +307,7 @@ export function ChatRoomView() {
               </span>
             </div>
 
-            {/* Actions: Sound & Leave */}
+            {/* Audio & Leave Actions */}
             <div className="flex items-center gap-1">
               <button
                 onClick={toggleSound}
@@ -263,8 +335,10 @@ export function ChatRoomView() {
       </header>
 
       {/* MESSAGES FEED CONTAINER */}
-      <main className="flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-6 overflow-y-auto flex flex-col justify-between">
-        {/* Messages List */}
+      <main
+        onContextMenu={(e) => e.preventDefault()}
+        className="private-chat-content flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-6 overflow-y-auto flex flex-col justify-between"
+      >
         <div className="space-y-4 pb-4">
           <AnimatePresence initial={false}>
             {messages.map((msg) => {
@@ -284,17 +358,20 @@ export function ChatRoomView() {
                 );
               }
 
+              const timeRemainingMsg = getMessageTimeRemaining(msg.expiresAt);
+
               return (
                 <motion.div
                   key={msg.id}
-                  initial={{ opacity: 0, y: 12, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+                  initial={{ opacity: 0, scale: 0.95, y: 14 }}
+                  animate={{ opacity: 1, scale: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.92, filter: "blur(4px)" }}
+                  transition={{ type: "spring", stiffness: 420, damping: 28 }}
                   className={`group relative flex flex-col ${
                     msg.isSelf ? "items-end" : "items-start"
                   }`}
                 >
-                  {/* Sender identity & timestamp */}
+                  {/* Sender identity, timestamp & individual disappearing timer */}
                   <div className="flex items-center gap-2 px-1 mb-1 text-[11px] font-mono text-zinc-500">
                     <span className="font-medium text-zinc-400">
                       {msg.senderName}
@@ -306,6 +383,39 @@ export function ChatRoomView() {
                         minute: "2-digit",
                       })}
                     </span>
+
+                    {/* Per-message self-destruct indicator */}
+                    {timeRemainingMsg && (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06] text-[10px] text-zinc-400 font-mono">
+                        <Clock className="w-2.5 h-2.5 text-sky-400/80" />
+                        {timeRemainingMsg}
+                      </span>
+                    )}
+
+                    {/* Delivery Status Indicator for outgoing messages */}
+                    {msg.isSelf && (
+                      <span className="ml-0.5">
+                        {msg.deliveryStatus === "sending" && (
+                          <span className="w-3 h-3 border border-zinc-400 border-t-transparent rounded-full animate-spin inline-block" />
+                        )}
+                        {msg.deliveryStatus === "sent" && (
+                          <Check className="w-3 h-3 text-zinc-400" />
+                        )}
+                        {msg.deliveryStatus === "delivered" && (
+                          <CheckCheck className="w-3.5 h-3.5 text-sky-400" />
+                        )}
+                        {msg.deliveryStatus === "failed" && (
+                          <button
+                            onClick={() => retrySendMessage(msg.id)}
+                            title="Retry sending"
+                            className="inline-flex items-center gap-1 text-red-400 hover:text-red-300 text-[10px]"
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                            <RotateCw className="w-2.5 h-2.5" />
+                          </button>
+                        )}
+                      </span>
+                    )}
                   </div>
 
                   {/* Quoted reply badge if replying */}
@@ -327,18 +437,58 @@ export function ChatRoomView() {
                     </div>
                   )}
 
-                  {/* Message Bubble */}
+                  {/* Message Bubble (Text + Image) */}
                   <div className="relative group/bubble flex items-center">
                     <div
-                      className={`px-5 py-3.5 rounded-2xl text-sm leading-relaxed max-w-[90vw] sm:max-w-lg transition-all ${
+                      className={`rounded-2xl text-sm leading-relaxed max-w-[90vw] sm:max-w-lg transition-all overflow-hidden ${
                         msg.isSelf
                           ? "bg-zinc-100 text-zinc-950 font-normal rounded-tr-sm shadow-[0_2px_12px_rgba(0,0,0,0.4)]"
                           : "bg-[#14171f] text-zinc-200 border border-white/[0.07] rounded-tl-sm shadow-[0_2px_12px_rgba(0,0,0,0.5)]"
                       }`}
                     >
-                      <p className="whitespace-pre-wrap break-words">
-                        {msg.content}
-                      </p>
+                      {/* Attached Image inside bubble */}
+                      {msg.imageUrl && (
+                        <div
+                          onClick={() =>
+                            setActiveLightboxImage({
+                              url: msg.imageUrl!,
+                              senderName: msg.senderName,
+                              timestamp: msg.timestamp,
+                            })
+                          }
+                          className="relative cursor-pointer group/img overflow-hidden bg-black/40"
+                        >
+                          {/* Image upload progress overlay */}
+                          {msg.deliveryStatus === "sending" && (
+                            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+                              <span className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin mb-2" />
+                              <span className="text-[10px] font-mono text-white tracking-wider">
+                                Uploading…
+                              </span>
+                            </div>
+                          )}
+
+                          <img
+                            src={msg.imageUrl}
+                            alt="Encrypted attachment"
+                            draggable={false}
+                            className="w-full max-h-72 sm:max-h-80 object-cover transition-transform duration-300 group-hover/img:scale-[1.02] pointer-events-none no-drag"
+                          />
+
+                          {/* Hover hint */}
+                          <div className="absolute bottom-2 right-2 px-2 py-0.5 rounded-lg bg-black/60 backdrop-blur-md opacity-0 group-hover/img:opacity-100 transition-opacity text-[10px] font-mono text-white flex items-center gap-1 pointer-events-none">
+                            <ImageIcon className="w-3 h-3" />
+                            <span>View</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Text content */}
+                      {msg.content && msg.content !== "[Photo]" && (
+                        <p className="px-5 py-3.5 whitespace-pre-wrap break-words">
+                          {msg.content}
+                        </p>
+                      )}
                     </div>
 
                     {/* Contextual hover actions */}
@@ -352,7 +502,7 @@ export function ChatRoomView() {
                           setReplyingTo({
                             id: msg.id,
                             senderName: msg.senderName,
-                            content: msg.content,
+                            content: msg.content || "Photo",
                           })
                         }
                         title="Reply"
@@ -373,13 +523,17 @@ export function ChatRoomView() {
                         <Smile className="w-3.5 h-3.5" />
                       </button>
 
-                      <button
-                        onClick={() => copyToClipboard(msg.content, "Message copied")}
-                        title="Copy text"
-                        className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 text-xs"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
+                      {msg.content && msg.content !== "[Photo]" && (
+                        <button
+                          onClick={() =>
+                            copyToClipboard(msg.content, "Message copied")
+                          }
+                          title="Copy text"
+                          className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 text-xs"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
 
                     {/* Emoji Reaction Popover */}
@@ -457,7 +611,7 @@ export function ChatRoomView() {
       </main>
 
       {/* COMPOSER FOOTER */}
-      <footer className="sticky bottom-0 z-40 px-4 sm:px-8 py-4 bg-[#090b0f]/85 border-t border-white/[0.07] backdrop-blur-xl">
+      <footer className="composer-container sticky bottom-0 z-40 px-4 sm:px-8 py-3 sm:py-4 bg-[#090b0f]/90 border-t border-white/[0.07] backdrop-blur-xl">
         <div className="max-w-4xl mx-auto">
           {/* Active Reply Banner */}
           {replyingTo && (
@@ -485,19 +639,70 @@ export function ChatRoomView() {
             </motion.div>
           )}
 
+          {/* Image Attachment Preview Bar */}
+          {imagePreviewUrl && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 6 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="flex items-center justify-between p-2 mb-2 rounded-2xl bg-white/[0.03] border border-white/[0.1] backdrop-blur-md"
+            >
+              <div className="flex items-center gap-3">
+                <img
+                  src={imagePreviewUrl}
+                  alt="Attachment preview"
+                  className="w-12 h-12 object-cover rounded-xl border border-white/10"
+                />
+                <div>
+                  <span className="text-xs font-medium text-white block">
+                    {selectedImageFile?.name || "Image attachment"}
+                  </span>
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    {selectedImageFile
+                      ? `${(selectedImageFile.size / 1024).toFixed(0)} KB • Ready to send`
+                      : "Photo attachment"}
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleRemoveSelectedImage}
+                className="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.05]"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+
           {/* Main Input Box */}
-          <div className="relative flex items-end gap-2 p-2 rounded-2xl bg-[#13161f] border border-white/[0.08] focus-within:border-white/25 focus-within:shadow-[0_0_20px_-5px_rgba(255,255,255,0.08)] transition-all">
-            {/* Attachment icon */}
+          <div className="relative flex items-end gap-1.5 sm:gap-2 p-1.5 sm:p-2 rounded-2xl bg-[#13161f] border border-white/[0.08] focus-within:border-white/25 focus-within:shadow-[0_0_20px_-5px_rgba(255,255,255,0.08)] transition-all">
+            {/* Hidden File Input */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/jpg"
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+
+            {/* Photo Attachment Button */}
             <button
               type="button"
-              onClick={() =>
-                copyToClipboard(session?.roomCode || "", "Room code copied")
-              }
-              title="Share Room Code"
-              className="p-2.5 rounded-xl text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.04] transition-colors shrink-0"
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach photo (JPG, PNG, WEBP)"
+              className="p-2.5 rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.04] transition-colors shrink-0"
             >
               <Paperclip className="w-4 h-4" />
             </button>
+
+            {/* Disappearing Message Timer Selector */}
+            <div className="pb-1 shrink-0">
+              <DisappearingTimerSelector
+                selectedSeconds={selectedTtl}
+                onSelect={setSelectedTtl}
+              />
+            </div>
 
             {/* Auto-growing Textarea */}
             <textarea
@@ -506,7 +711,7 @@ export function ChatRoomView() {
               value={inputVal}
               onChange={handleTextareaChange}
               onKeyDown={handleKeyDown}
-              placeholder="Write a message…"
+              placeholder={selectedImageFile ? "Add a caption…" : "Write a message…"}
               className="w-full resize-none bg-transparent py-2 px-1 text-sm text-white placeholder:text-zinc-500 focus:outline-none max-h-36 leading-relaxed"
             />
 
@@ -539,24 +744,33 @@ export function ChatRoomView() {
             {/* Send Button */}
             <button
               type="button"
-              disabled={!inputVal.trim()}
+              disabled={!inputVal.trim() && !selectedImageFile}
               onClick={handleSend}
-              className="p-2.5 rounded-xl bg-white text-zinc-950 hover:bg-zinc-200 disabled:opacity-30 disabled:hover:bg-white disabled:pointer-events-none transition-all shrink-0"
+              className="p-2.5 rounded-xl bg-white text-zinc-950 hover:bg-zinc-200 disabled:opacity-30 disabled:hover:bg-white disabled:pointer-events-none transition-all shrink-0 active:scale-95"
             >
               <Send className="w-4 h-4 stroke-[2.2]" />
             </button>
           </div>
 
+          {/* Footer status notice */}
           <div className="flex items-center justify-between px-2 pt-2 text-[10px] font-mono text-zinc-400">
             <span>Enter to send • Shift + Enter for newline</span>
             <span className="flex items-center gap-1">
               <Sparkles className="w-2.5 h-2.5 text-zinc-400" />
-              All messages dissolve at 00:00
+              Protected by 5MIN Privacy Guard
             </span>
           </div>
         </div>
       </footer>
+
+      {/* Lightbox Fullscreen Image Modal */}
+      <LightboxModal
+        isOpen={Boolean(activeLightboxImage)}
+        imageUrl={activeLightboxImage?.url || null}
+        senderName={activeLightboxImage?.senderName}
+        timestamp={activeLightboxImage?.timestamp}
+        onClose={() => setActiveLightboxImage(null)}
+      />
     </div>
   );
 }
-
