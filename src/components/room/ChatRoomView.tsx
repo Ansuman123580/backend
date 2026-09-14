@@ -31,6 +31,8 @@ import {
   Trash2,
   Link2,
   UploadCloud,
+  ChevronDown,
+  ExternalLink,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { LightboxModal } from "@/components/ui/LightboxModal";
@@ -41,7 +43,30 @@ import { ViewOncePhotoBubble } from "@/components/room/ViewOncePhotoBubble";
 import { DestroyRoomModal } from "@/components/room/DestroyRoomModal";
 import { RoomSettingsDrawer } from "@/components/room/RoomSettingsDrawer";
 
-const EMOJI_OPTIONS = ["👍", "🔥", "🤫", "✨", "⏳"];
+const EMOJI_OPTIONS = ["❤️", "😂", "👍", "🔥", "😮", "😢"];
+
+function renderSafeMessageContent(text: string) {
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = text.split(urlRegex);
+  return parts.map((part, i) => {
+    if (part.match(urlRegex)) {
+      return (
+        <a
+          key={i}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="text-sky-400 hover:text-sky-300 underline underline-offset-2 break-all inline-flex items-center gap-0.5"
+        >
+          <span>{part}</span>
+          <ExternalLink className="w-2.5 h-2.5 inline shrink-0" />
+        </a>
+      );
+    }
+    return part;
+  });
+}
 
 export function ChatRoomView() {
   const {
@@ -51,11 +76,15 @@ export function ChatRoomView() {
     isTyping,
     connectionState,
     isOwner,
+    participants,
     sendMessage,
     retrySendMessage,
     deleteMessage,
     markViewOnceOpened,
     updateRoomSettings,
+    kickParticipant,
+    revokeInvite,
+    markMessagesAsSeen,
     destroyRoom,
     copyInviteLink,
     addReaction,
@@ -101,10 +130,22 @@ export function ChatRoomView() {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [holdToRevealImageId, setHoldToRevealImageId] = useState<string | null>(null);
   const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [stealthProtectionEnabled, setStealthProtectionEnabled] = useState(true);
   const [antiScreenshotActive, setAntiScreenshotActive] = useState(true);
 
-  // Release held reveal on blur/mouseup anywhere
+  // Smart Auto-Scroll State
+  const [userIsScrolledUp, setUserIsScrolledUp] = useState(false);
+  const [unreadNewCount, setUnreadNewCount] = useState(0);
+  const prevMessagesCountRef = useRef(messages.length);
+
+  const chatContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const touchStartXRef = useRef<number>(0);
+
+  // Release held reveal on blur/mouseup
   useEffect(() => {
     const handleResetHold = () => {
       setHoldToRevealImageId(null);
@@ -120,16 +161,53 @@ export function ChatRoomView() {
     };
   }, []);
 
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Auto-scroll to bottom on new messages
+  // Mark incoming messages as seen on view
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isTyping, imagePreviewUrl]);
+    markMessagesAsSeen();
+  }, [messages.length, markMessagesAsSeen]);
 
-  // Handle auto-expanding textarea
+  // Handle scroll position & smart auto-scroll
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const { scrollTop, scrollHeight, clientHeight } = e.currentTarget;
+    const distanceToBottom = scrollHeight - scrollTop - clientHeight;
+    const isUp = distanceToBottom > 140;
+    setUserIsScrolledUp(isUp);
+    if (!isUp) {
+      setUnreadNewCount(0);
+    }
+  };
+
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setUserIsScrolledUp(false);
+    setUnreadNewCount(0);
+  }, []);
+
+  // Auto-scroll only if user is near bottom
+  useEffect(() => {
+    if (messages.length > prevMessagesCountRef.current) {
+      if (userIsScrolledUp) {
+        setUnreadNewCount((prev) => prev + 1);
+      } else {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      }
+    }
+    prevMessagesCountRef.current = messages.length;
+  }, [messages, userIsScrolledUp]);
+
+  // Click quoted reply -> scroll to target message with glowing flash
+  const handleScrollToRepliedMessage = (targetId: string) => {
+    const targetEl = document.getElementById(`msg-${targetId}`);
+    if (targetEl) {
+      targetEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightedMessageId(targetId);
+      setTimeout(() => {
+        setHighlightedMessageId(null);
+      }, 2200);
+    }
+  };
+
+  // Auto-expanding textarea
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setInputVal(val);
@@ -159,23 +237,26 @@ export function ChatRoomView() {
     }
   };
 
-  const processImageFile = useCallback((file: File) => {
-    if (session?.allowImages === false) {
-      triggerToast("Photo sharing is disabled by room owner.", "warning");
-      return;
-    }
-    if (!file.type.startsWith("image/")) {
-      triggerToast("Please select an image (JPG, PNG, WEBP).", "warning");
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      triggerToast("Image file size exceeds 10MB.", "warning");
-      return;
-    }
-    setSelectedImageFile(file);
-    setImagePreviewUrl(URL.createObjectURL(file));
-    triggerToast("Photo ready to send", "info");
-  }, [session?.allowImages, triggerToast]);
+  const processImageFile = useCallback(
+    (file: File) => {
+      if (session?.allowImages === false) {
+        triggerToast("Photo sharing is disabled in this room.", "warning");
+        return;
+      }
+      if (!file.type.startsWith("image/")) {
+        triggerToast("Please select an image (JPG, PNG, WEBP).", "warning");
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        triggerToast("Image file size exceeds 10MB.", "warning");
+        return;
+      }
+      setSelectedImageFile(file);
+      setImagePreviewUrl(URL.createObjectURL(file));
+      triggerToast("Photo attached. Ready to send.", "info");
+    },
+    [session?.allowImages, triggerToast]
+  );
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -196,7 +277,7 @@ export function ChatRoomView() {
     }
   };
 
-  // Drag and drop photo upload
+  // Drag & drop handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -213,7 +294,6 @@ export function ChatRoomView() {
     e.preventDefault();
     e.stopPropagation();
     setIsDraggingOver(false);
-
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
       processImageFile(files[0]);
@@ -293,7 +373,7 @@ export function ChatRoomView() {
     return `${Math.ceil(diff / 60)}m`;
   };
 
-  // Lightbox list navigation calculation
+  // Lightbox navigation calculations
   const allImages = messages
     .filter((m) => Boolean(m.imageUrl) && !m.isViewOnce && !m.isDeleted)
     .map((m) => ({
@@ -321,10 +401,11 @@ export function ChatRoomView() {
     }
   };
 
-  // Timer Progress Math: room lifespan or fallback
   const totalSeconds = session?.durationSeconds || 300;
   const progressRatio = Math.max(0, timeRemaining / totalSeconds);
   const strokeDashoffset = 100 - progressRatio * 100;
+
+  const activeOnlineCount = participants.filter((p) => p.status !== "offline").length || 1;
 
   return (
     <div
@@ -348,7 +429,7 @@ export function ChatRoomView() {
         nickname={session?.participants?.find((p) => p.isSelf)?.name || "GUEST"}
       />
 
-      {/* Print protection shield banner */}
+      {/* Print Protection Shield banner */}
       <div className="print-shield-notice">
         🔒 5MIN: Private temporary conversation. Printing content is prohibited.
       </div>
@@ -360,7 +441,7 @@ export function ChatRoomView() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md border-2 border-dashed border-sky-400 m-4 rounded-3xl pointer-events-none"
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md border-2 border-dashed border-sky-400 m-4 rounded-3xl pointer-events-none"
           >
             <div className="w-16 h-16 rounded-2xl bg-sky-500/10 border border-sky-400/30 flex items-center justify-center text-sky-400 mb-4 shadow-[0_0_30px_rgba(56,189,248,0.2)]">
               <UploadCloud className="w-8 h-8" />
@@ -425,9 +506,8 @@ export function ChatRoomView() {
               <div className="flex items-center gap-2 text-xs text-zinc-400 font-light">
                 <Users className="w-3 h-3 text-zinc-400" />
                 <span>
-                  {session?.participantCount
-                    ? `${session.participantCount} participant${session.participantCount > 1 ? "s" : ""}`
-                    : "Private Channel"}
+                  {activeOnlineCount} {activeOnlineCount === 1 ? "participant online" : "participants online"}
+                  {session?.maxParticipants ? ` (max ${session.maxParticipants})` : ""}
                 </span>
               </div>
             </div>
@@ -454,7 +534,7 @@ export function ChatRoomView() {
                   )}
                 </button>
 
-                {/* Invite Link Button */}
+                {/* Direct Invite Link */}
                 <button
                   onClick={handleCopyInviteLink}
                   title="Copy direct invite link"
@@ -512,7 +592,7 @@ export function ChatRoomView() {
               </span>
             </div>
 
-            {/* Header Controls: Anti-screenshot, Audio, Settings & Leave */}
+            {/* Header Controls */}
             <div className="flex items-center gap-1 sm:gap-1.5">
               {/* Anti-Screenshot Master Guard Button */}
               <button
@@ -525,7 +605,7 @@ export function ChatRoomView() {
                 }`}
                 title={
                   antiScreenshotActive
-                    ? "Anti-Screenshot Guard Active: Messages & photos blurred until hovered/tapped"
+                    ? "Anti-Screenshot Guard Active: Messages blurred until hovered"
                     : "Anti-Screenshot Guard Off"
                 }
               >
@@ -570,7 +650,7 @@ export function ChatRoomView() {
                 )}
               </button>
 
-              {/* Host Settings Button */}
+              {/* Settings Button */}
               <button
                 onClick={() => setIsSettingsOpen(true)}
                 aria-label="Room Settings"
@@ -596,8 +676,10 @@ export function ChatRoomView() {
 
       {/* MESSAGES FEED CONTAINER */}
       <main
+        ref={chatContainerRef}
+        onScroll={handleScroll}
         onContextMenu={(e) => e.preventDefault()}
-        className="private-chat-content flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-6 overflow-y-auto flex flex-col justify-between"
+        className="private-chat-content flex-1 max-w-4xl w-full mx-auto px-4 sm:px-8 py-6 overflow-y-auto flex flex-col justify-between relative"
       >
         <div className="space-y-4 pb-4">
           <AnimatePresence initial={false}>
@@ -623,6 +705,7 @@ export function ChatRoomView() {
                 return (
                   <motion.div
                     key={msg.id}
+                    id={`msg-${msg.id}`}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     className={`flex flex-col ${msg.isSelf ? "items-end" : "items-start"}`}
@@ -636,19 +719,36 @@ export function ChatRoomView() {
               }
 
               const timeRemainingMsg = getMessageTimeRemaining(msg.expiresAt);
+              const isTargetHighlighted = highlightedMessageId === msg.id;
 
               return (
                 <motion.div
                   key={msg.id}
+                  id={`msg-${msg.id}`}
                   initial={{ opacity: 0, scale: 0.95, y: 14 }}
                   animate={{ opacity: 1, scale: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.92, filter: "blur(4px)" }}
                   transition={{ type: "spring", stiffness: 420, damping: 28 }}
+                  onTouchStart={(e) => {
+                    touchStartXRef.current = e.touches[0].clientX;
+                  }}
+                  onTouchEnd={(e) => {
+                    const touchEndX = e.changedTouches[0].clientX;
+                    const diffX = touchEndX - touchStartXRef.current;
+                    if (Math.abs(diffX) > 55 && session?.allowReplies !== false) {
+                      setReplyingTo({
+                        id: msg.id,
+                        senderName: msg.senderName,
+                        content: msg.content || "Photo",
+                      });
+                      textareaRef.current?.focus();
+                    }
+                  }}
                   className={`group relative flex flex-col ${
                     msg.isSelf ? "items-end" : "items-start"
                   }`}
                 >
-                  {/* Sender identity, timestamp & individual timer */}
+                  {/* Sender identity, timestamp & countdown */}
                   <div className="flex items-center gap-2 px-1 mb-1 text-[11px] font-mono text-zinc-500">
                     <span className="font-medium text-zinc-400">
                       {msg.senderName}
@@ -661,7 +761,7 @@ export function ChatRoomView() {
                       })}
                     </span>
 
-                    {/* Per-message disappearing countdown pill */}
+                    {/* Per-message countdown badge */}
                     {timeRemainingMsg && (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-white/[0.04] border border-white/[0.06] text-[10px] text-zinc-400 font-mono">
                         <Clock className="w-2.5 h-2.5 text-sky-400/80" />
@@ -669,9 +769,9 @@ export function ChatRoomView() {
                       </span>
                     )}
 
-                    {/* Delivery Status Indicator for outgoing */}
+                    {/* Delivery Status Indicator */}
                     {msg.isSelf && (
-                      <span className="ml-0.5">
+                      <span className="ml-0.5 flex items-center" title={`Status: ${msg.deliveryStatus || "sent"}`}>
                         {msg.deliveryStatus === "sending" && (
                           <span className="w-3 h-3 border border-zinc-400 border-t-transparent rounded-full animate-spin inline-block" />
                         )}
@@ -679,6 +779,9 @@ export function ChatRoomView() {
                           <Check className="w-3 h-3 text-zinc-400" />
                         )}
                         {msg.deliveryStatus === "delivered" && (
+                          <CheckCheck className="w-3.5 h-3.5 text-zinc-300" />
+                        )}
+                        {msg.deliveryStatus === "seen" && (
                           <CheckCheck className="w-3.5 h-3.5 text-sky-400" />
                         )}
                         {msg.deliveryStatus === "failed" && (
@@ -697,25 +800,33 @@ export function ChatRoomView() {
 
                   {/* Quoted reply banner if replying */}
                   {msg.replyTo && (
-                    <div
-                      className={`text-xs px-3 py-1.5 rounded-t-xl mb-[-2px] border border-b-0 max-w-[85%] sm:max-w-md ${
+                    <button
+                      type="button"
+                      onClick={() => handleScrollToRepliedMessage(msg.replyTo!.id)}
+                      className={`text-left text-xs px-3 py-1.5 rounded-t-xl mb-[-2px] border border-b-0 max-w-[85%] sm:max-w-md transition-all hover:bg-white/[0.05] ${
                         msg.isSelf
                           ? "bg-white/[0.03] border-white/10 text-zinc-400 self-end"
                           : "bg-white/[0.02] border-white/10 text-zinc-400 self-start"
                       }`}
                     >
                       <div className="flex items-center gap-1.5 text-[10px] font-mono text-zinc-500 mb-0.5">
-                        <CornerDownRight className="w-2.5 h-2.5" />
+                        <CornerDownRight className="w-2.5 h-2.5 text-sky-400" />
                         <span>Replying to {msg.replyTo.senderName}</span>
                       </div>
                       <p className="truncate line-clamp-1 italic text-zinc-300">
                         {msg.replyTo.content}
                       </p>
-                    </div>
+                    </button>
                   )}
 
-                  {/* Message Bubble (View-Once OR Regular Content) */}
-                  <div className="relative group/bubble flex items-center">
+                  {/* Message Bubble */}
+                  <div
+                    className={`relative group/bubble flex items-center transition-all duration-300 ${
+                      isTargetHighlighted
+                        ? "ring-2 ring-sky-400 ring-offset-2 ring-offset-black shadow-[0_0_25px_rgba(56,189,248,0.5)] rounded-2xl"
+                        : ""
+                    }`}
+                  >
                     {msg.isViewOnce ? (
                       <ViewOncePhotoBubble
                         messageId={msg.id}
@@ -744,7 +855,7 @@ export function ChatRoomView() {
                             : "bg-[#14171f] text-zinc-200 border border-white/[0.07] rounded-tl-sm shadow-[0_2px_12px_rgba(0,0,0,0.5)]"
                         }`}
                       >
-                        {/* Attached Image inside bubble */}
+                        {/* Attached Image */}
                         {msg.imageUrl && (
                           <div
                             onMouseDown={() => setHoldToRevealImageId(msg.id)}
@@ -755,7 +866,7 @@ export function ChatRoomView() {
                             onContextMenu={(e) => e.preventDefault()}
                             className="relative cursor-pointer group/img overflow-hidden bg-black/40 select-none no-drag"
                           >
-                            {/* Image upload progress overlay */}
+                            {/* Upload spinner */}
                             {msg.deliveryStatus === "sending" && (
                               <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
                                 <span className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin mb-2" />
@@ -776,7 +887,7 @@ export function ChatRoomView() {
                               }`}
                             />
 
-                            {/* Anti-screenshot Hold-to-reveal Prompt */}
+                            {/* Anti-screenshot prompt */}
                             {stealthProtectionEnabled && holdToRevealImageId !== msg.id && (
                               <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm p-4 text-center pointer-events-none">
                                 <div className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-white mb-2 shadow-lg">
@@ -791,7 +902,7 @@ export function ChatRoomView() {
                               </div>
                             )}
 
-                            {/* Expand to Lightbox action when unblurred */}
+                            {/* Expand button */}
                             {(!stealthProtectionEnabled || holdToRevealImageId === msg.id) && (
                               <button
                                 type="button"
@@ -829,7 +940,7 @@ export function ChatRoomView() {
                                   : "filter blur-0 opacity-100 scale-100"
                               }`}
                             >
-                              {msg.content}
+                              {renderSafeMessageContent(msg.content)}
                             </p>
                             {antiScreenshotActive && hoveredMessageId !== msg.id && (
                               <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-3">
@@ -849,16 +960,17 @@ export function ChatRoomView() {
                         msg.isSelf ? "-left-36" : "-right-36"
                       }`}
                     >
-                      {/* Reply Button (if allowed) */}
+                      {/* Reply Button */}
                       {session?.allowReplies !== false && (
                         <button
-                          onClick={() =>
+                          onClick={() => {
                             setReplyingTo({
                               id: msg.id,
                               senderName: msg.senderName,
                               content: msg.content || "Photo",
-                            })
-                          }
+                            });
+                            textareaRef.current?.focus();
+                          }}
                           title="Reply"
                           className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 text-xs"
                         >
@@ -866,7 +978,7 @@ export function ChatRoomView() {
                         </button>
                       )}
 
-                      {/* React Button (if allowed) */}
+                      {/* React Button */}
                       {session?.allowReactions !== false && (
                         <button
                           onClick={() =>
@@ -894,7 +1006,7 @@ export function ChatRoomView() {
                         </button>
                       )}
 
-                      {/* Delete Message Button (Sender or Host) */}
+                      {/* Delete Message Button */}
                       {(msg.isSelf || isOwner) && (
                         <button
                           onClick={() => deleteMessage(msg.id)}
@@ -978,6 +1090,24 @@ export function ChatRoomView() {
 
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Floating "New Messages" Pill when scrolled up */}
+        <AnimatePresence>
+          {userIsScrolledUp && unreadNewCount > 0 && (
+            <motion.button
+              initial={{ opacity: 0, y: 10, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.9 }}
+              onClick={scrollToBottom}
+              className="sticky bottom-4 left-1/2 -translate-x-1/2 z-30 mx-auto px-4 py-2 rounded-full bg-white text-zinc-950 font-mono text-xs font-semibold shadow-2xl flex items-center gap-2 hover:scale-105 transition-all"
+            >
+              <ChevronDown className="w-3.5 h-3.5" />
+              <span>
+                {unreadNewCount} new message{unreadNewCount > 1 ? "s" : ""}
+              </span>
+            </motion.button>
+          )}
+        </AnimatePresence>
       </main>
 
       {/* COMPOSER FOOTER */}
@@ -1037,26 +1167,28 @@ export function ChatRoomView() {
               </div>
 
               <div className="flex items-center gap-2">
-                {/* View-Once Toggle inside Preview Bar */}
-                <button
-                  type="button"
-                  onClick={() => setIsViewOnceSelected(!isViewOnceSelected)}
-                  title={
-                    isViewOnceSelected
-                      ? "View Once: Photo disappears after being opened once"
-                      : "Click to enable View Once mode"
-                  }
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-mono font-semibold transition-all ${
-                    isViewOnceSelected
-                      ? "bg-sky-500/20 border-sky-400/50 text-sky-300 shadow-[0_0_15px_rgba(56,189,248,0.25)]"
-                      : "bg-white/[0.04] border-white/10 text-zinc-400 hover:text-white"
-                  }`}
-                >
-                  <span className="w-4 h-4 rounded-full border border-current flex items-center justify-center text-[10px] font-bold">
-                    1
-                  </span>
-                  <span>VIEW ONCE</span>
-                </button>
+                {/* View-Once Toggle */}
+                {session?.allowViewOnce !== false && (
+                  <button
+                    type="button"
+                    onClick={() => setIsViewOnceSelected(!isViewOnceSelected)}
+                    title={
+                      isViewOnceSelected
+                        ? "View Once: Photo disappears after being opened once"
+                        : "Click to enable View Once mode"
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-mono font-semibold transition-all ${
+                      isViewOnceSelected
+                        ? "bg-sky-500/20 border-sky-400/50 text-sky-300 shadow-[0_0_15px_rgba(56,189,248,0.25)]"
+                        : "bg-white/[0.04] border-white/10 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    <span className="w-4 h-4 rounded-full border border-current flex items-center justify-center text-[10px] font-bold">
+                      1
+                    </span>
+                    <span>VIEW ONCE</span>
+                  </button>
+                )}
 
                 <button
                   type="button"
@@ -1185,11 +1317,16 @@ export function ChatRoomView() {
         isOwner={isOwner}
         roomCode={session?.roomCode || ""}
         durationSeconds={session?.durationSeconds || 300}
-        participants={session?.participants || []}
+        participants={participants.length > 0 ? participants : session?.participants || []}
+        maxParticipants={session?.maxParticipants || 2}
         allowImages={session?.allowImages ?? true}
         allowReactions={session?.allowReactions ?? true}
         allowReplies={session?.allowReplies ?? true}
+        allowViewOnce={session?.allowViewOnce ?? true}
+        isInviteRevoked={session?.isInviteRevoked ?? false}
         onUpdateSettings={updateRoomSettings}
+        onKickParticipant={kickParticipant}
+        onRevokeInvite={revokeInvite}
         onDestroyRoom={() => {
           setIsSettingsOpen(false);
           setIsDestroyModalOpen(true);

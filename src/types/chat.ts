@@ -17,15 +17,16 @@ export interface Participant {
   avatarSeed?: string;
   joinedAt: number;
   status?: "online" | "offline";
+  sessionId?: string;
 }
 
 export interface MessageReaction {
   emoji: string;
   count: number;
-  users: string[]; // participant ids
+  users: string[]; // participant ids / session ids
 }
 
-export type DeliveryStatus = "sending" | "sent" | "delivered" | "failed";
+export type DeliveryStatus = "sending" | "sent" | "delivered" | "seen" | "failed";
 
 export interface Message {
   id: string;
@@ -38,6 +39,8 @@ export interface Message {
   imagePath?: string | null;
   isViewOnce?: boolean;
   viewedAt?: number | null;
+  seenAt?: number | null;
+  deliveredAt?: number | null;
   isDeleted?: boolean;
   expiresAt?: number;
   ttlSeconds?: number;
@@ -49,6 +52,18 @@ export interface Message {
     content: string;
   } | null;
   reactions?: MessageReaction[];
+}
+
+export interface CreateRoomOptions {
+  durationSeconds: number;
+  defaultMessageTtl?: number | null;
+  defaultPhotoTtl?: number | null;
+  allowImages?: boolean;
+  allowReactions?: boolean;
+  allowReplies?: boolean;
+  allowViewOnce?: boolean;
+  maxParticipants?: number;
+  nickname?: string;
 }
 
 export interface RoomSession {
@@ -65,7 +80,11 @@ export interface RoomSession {
   allowImages?: boolean;
   allowReactions?: boolean;
   allowReplies?: boolean;
+  allowViewOnce?: boolean;
   maxParticipants?: number;
+  defaultMessageTtl?: number | null;
+  defaultPhotoTtl?: number | null;
+  isInviteRevoked?: boolean;
 }
 
 export interface ToastMessage {

@@ -3,8 +3,41 @@ import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { checkRateLimit } from "@/lib/rateLimit";
 import crypto from "crypto";
 
-const MAX_UPLOAD_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10MB
 const ALLOWED_MIME_TYPES = ["image/jpeg", "image/png", "image/webp", "image/jpg"];
+
+function validateImageMagicBytes(buffer: Buffer): { valid: boolean; detectedExt: string } {
+  if (buffer.length < 12) return { valid: false, detectedExt: "" };
+
+  // JPEG: FF D8 FF
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return { valid: true, detectedExt: "jpg" };
+  }
+
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return { valid: true, detectedExt: "png" };
+  }
+
+  // WEBP: RIFF....WEBP
+  if (
+    buffer.toString("ascii", 0, 4) === "RIFF" &&
+    buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return { valid: true, detectedExt: "webp" };
+  }
+
+  return { valid: false, detectedExt: "" };
+}
 
 export async function POST(
   req: NextRequest,
@@ -54,14 +87,14 @@ export async function POST(
         {
           success: false,
           error: "FILE_TOO_LARGE",
-          message: "Image exceeds 5MB limit.",
+          message: "Image exceeds 10MB limit.",
         },
         { status: 413 }
       );
     }
 
-    // Rate limiting: 15 uploads per minute per session
-    const rateLimit = checkRateLimit(sessionId, "send_message", 15, 60000);
+    // Rate limiting: 20 uploads per minute per session
+    const rateLimit = checkRateLimit(sessionId, "send_message", 20, 60000);
     if (!rateLimit.allowed) {
       return NextResponse.json(
         {
@@ -74,12 +107,26 @@ export async function POST(
       );
     }
 
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    // Deep inspect magic bytes to prevent polyglot / script injection
+    const magic = validateImageMagicBytes(buffer);
+    if (!magic.valid) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "CORRUPTED_OR_INVALID_IMAGE",
+          message: "The uploaded file is not a valid image.",
+        },
+        { status: 400 }
+      );
+    }
+
     const supabase = getSupabaseAdmin();
     const serverTime = new Date();
 
     // Offline / Local mock fallback
     if (!supabase) {
-      const buffer = Buffer.from(await file.arrayBuffer());
       const base64 = `data:${file.type};base64,${buffer.toString("base64")}`;
       return NextResponse.json({
         success: true,
@@ -91,24 +138,43 @@ export async function POST(
 
     const normalizedCode = code.trim().toUpperCase();
 
-    // 1. Verify active room & expiration
-    const { data: room, error: roomErr } = await supabase
+    // 1. Verify active room & expiration with fallback
+    let room: any = null;
+    const { data: fullRoom, error: roomErr } = await supabase
       .from("rooms")
-      .select("id, status, expires_at")
+      .select("id, status, expires_at, allow_images, default_photo_ttl")
       .eq("code", normalizedCode)
       .maybeSingle();
 
-    if (roomErr || !room) {
-      return NextResponse.json(
-        { success: false, error: "ROOM_NOT_FOUND", message: "Room not found." },
-        { status: 404 }
-      );
+    if (roomErr || !fullRoom) {
+      const { data: baseRoom, error: baseErr } = await supabase
+        .from("rooms")
+        .select("id, status, expires_at, allow_images")
+        .eq("code", normalizedCode)
+        .maybeSingle();
+
+      if (baseErr || !baseRoom) {
+        return NextResponse.json(
+          { success: false, error: "ROOM_NOT_FOUND", message: "Room not found." },
+          { status: 404 }
+        );
+      }
+      room = baseRoom;
+    } else {
+      room = fullRoom;
     }
 
     if (room.status === "expired" || serverTime >= new Date(room.expires_at)) {
       return NextResponse.json(
         { success: false, error: "ROOM_EXPIRED", message: "This room has expired." },
         { status: 410 }
+      );
+    }
+
+    if (room.allow_images === false) {
+      return NextResponse.json(
+        { success: false, error: "PHOTOS_DISABLED", message: "Photo sharing is disabled in this room." },
+        { status: 403 }
       );
     }
 
@@ -127,20 +193,18 @@ export async function POST(
       );
     }
 
-    // 3. Upload file to Supabase Storage
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const ext = file.type === "image/webp" ? "webp" : file.type === "image/png" ? "png" : "jpg";
-    const objectPath = `rooms/${room.id}/${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+    // 3. Upload file to Supabase Storage with cryptographic random filename and detected extension
+    const ext = magic.detectedExt;
+    const objectPath = `rooms/${room.id}/${Date.now()}-${crypto.randomBytes(8).toString("hex")}.${ext}`;
 
     const { error: uploadErr } = await supabase.storage
       .from("room-attachments")
       .upload(objectPath, buffer, {
-        contentType: file.type,
+        contentType: file.type || `image/${ext}`,
         upsert: false,
       });
 
     if (uploadErr) {
-      // If bucket doesn't exist yet, fallback gracefully to base64 so client never crashes
       console.warn("[5MIN] Supabase storage upload warning:", uploadErr.message);
       const base64 = `data:${file.type};base64,${buffer.toString("base64")}`;
       return NextResponse.json({

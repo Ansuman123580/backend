@@ -47,6 +47,7 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
     const serverTime = new Date();
+    const sanitizedNickname = (typeof nickname === "string" ? nickname.trim().slice(0, 30) : "") || "Guest";
 
     // If Supabase is not yet configured, allow local validation for preview mode
     if (!supabase) {
@@ -58,16 +59,21 @@ export async function POST(req: NextRequest) {
         createdAt: serverTime.toISOString(),
         expiresAt: new Date(serverTime.getTime() + 5 * 60 * 1000).toISOString(),
         participantCount: 2,
+        maxParticipants: 2,
+        allowImages: true,
+        allowReactions: true,
+        allowReplies: true,
+        allowViewOnce: true,
         serverTime: serverTime.toISOString(),
         mode: "offline_mock",
       });
     }
 
-    // Call atomic PostgreSQL stored procedure (handles row lock, max 2 participants & race condition)
+    // Call atomic PostgreSQL stored procedure (handles row lock, max participants & race conditions)
     const { data, error } = await supabase.rpc("join_room", {
       p_code: normalizedCode,
       p_session_id: sessionId,
-      p_nickname: (nickname || "Guest").slice(0, 30),
+      p_nickname: sanitizedNickname,
     });
 
     if (error) {
@@ -80,6 +86,11 @@ export async function POST(req: NextRequest) {
           createdAt: serverTime.toISOString(),
           expiresAt: new Date(serverTime.getTime() + 5 * 60 * 1000).toISOString(),
           participantCount: 2,
+          maxParticipants: 2,
+          allowImages: true,
+          allowReactions: true,
+          allowReplies: true,
+          allowViewOnce: true,
           serverTime: serverTime.toISOString(),
           mode: "offline_mock",
         });
@@ -96,6 +107,8 @@ export async function POST(req: NextRequest) {
           ? 404
           : data.error === "ROOM_EXPIRED"
           ? 410
+          : data.error === "INVITE_REVOKED"
+          ? 403
           : data.error === "ROOM_FULL"
           ? 409
           : 400;
@@ -118,6 +131,13 @@ export async function POST(req: NextRequest) {
       createdAt: data.created_at,
       expiresAt: data.expires_at,
       participantCount: data.participant_count,
+      maxParticipants: data.max_participants || 2,
+      allowImages: data.allow_images ?? true,
+      allowReactions: data.allow_reactions ?? true,
+      allowReplies: data.allow_replies ?? true,
+      allowViewOnce: data.allow_view_once ?? true,
+      defaultMessageTtl: data.default_message_ttl,
+      defaultPhotoTtl: data.default_photo_ttl,
       serverTime: data.server_time || serverTime.toISOString(),
       mode: "supabase",
     });
@@ -142,4 +162,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-

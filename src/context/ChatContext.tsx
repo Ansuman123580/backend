@@ -17,6 +17,7 @@ import {
   ToastMessage,
   DeliveryStatus,
   ConnectionState,
+  CreateRoomOptions,
 } from "@/types/chat";
 import { isValidRoomCodeFormat } from "@/lib/roomCode";
 import {
@@ -33,7 +34,7 @@ import { compressImage } from "@/lib/imageCompression";
 const SESSION_DURATION = 300; // 5 minutes in seconds
 
 const INITIAL_PEER_RESPONSES = [
-  "Connected. This room disappears in 5 minutes.",
+  "Connected. This room disappears when timer runs out.",
   "Quick question: are we aligned on the private release date?",
   "Understood. Let's keep this completely off-the-record.",
   "Photo received. Beautiful clarity.",
@@ -53,17 +54,20 @@ interface ChatContextType {
   isCriticalExpiring: boolean;
   connectionState: ConnectionState;
   isOwner: boolean;
+  userNickname: string;
+  setUserNickname: (name: string) => void;
   selfParticipant: Participant;
   peerParticipant: Participant;
+  participants: Participant[];
   selectedTtl: number;
   setSelectedTtl: (seconds: number) => void;
   roomLifespan: number;
   setRoomLifespan: (seconds: number) => void;
   goToScreen: (screen: ScreenState) => void;
-  initiateCreateRoom: (customDurationSeconds?: number) => Promise<string>;
+  initiateCreateRoom: (options?: number | CreateRoomOptions) => Promise<string>;
   updateRoomLifespan: (seconds: number) => Promise<void>;
   enterCreatedRoom: () => void;
-  joinRoom: (code: string) => Promise<boolean>;
+  joinRoom: (code: string, nickname?: string) => Promise<boolean>;
   sendMessage: (
     content: string,
     replyTo?: Message["replyTo"],
@@ -77,8 +81,13 @@ interface ChatContextType {
     allowImages?: boolean;
     allowReactions?: boolean;
     allowReplies?: boolean;
+    allowViewOnce?: boolean;
     durationSeconds?: number;
+    maxParticipants?: number;
   }) => Promise<void>;
+  kickParticipant: (targetSessionId: string) => Promise<void>;
+  revokeInvite: () => Promise<void>;
+  markMessagesAsSeen: () => void;
   destroyRoom: () => Promise<void>;
   copyInviteLink: () => Promise<void>;
   addReaction: (messageId: string, emoji: string) => void;
@@ -103,6 +112,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [sessionId, setSessionId] = useState<string>("");
+  const [userNickname, setUserNickname] = useState<string>("Host");
+  const [participants, setParticipants] = useState<Participant[]>([]);
   const [selectedTtl, setSelectedTtl] = useState<number>(300); // Default 5m
   const [roomLifespan, setRoomLifespan] = useState<number>(300); // Default room lifespan 5m
   const [connectionState, setConnectionState] = useState<ConnectionState>("connected");
@@ -119,7 +130,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   // Track browser online/offline status
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const handleOnline = () => setConnectionState("connected");
     const handleOffline = () => setConnectionState("offline");
     window.addEventListener("online", handleOnline);
@@ -130,16 +140,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Initialize or restore client session identifier
+  // Initialize or restore anonymous session identity
   useEffect(() => {
-    if (typeof window === "undefined") return;
     try {
       let stored = localStorage.getItem("5min_session_id");
       if (!stored) {
-        stored =
-          typeof crypto !== "undefined" && crypto.randomUUID
-            ? crypto.randomUUID()
-            : `sess_${Date.now()}_${Math.random()}`;
+        stored = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
         localStorage.setItem("5min_session_id", stored);
       }
       setSessionId(stored);
@@ -152,7 +158,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const selfParticipant: Participant = {
     id: sessionId || "user-self",
-    name: "You",
+    sessionId: sessionId || "user-self",
+    name: userNickname || "You",
     isSelf: true,
     isOwner: isOwner,
     status: connectionState === "offline" ? "offline" : "online",
@@ -161,6 +168,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const peerParticipant: Participant = {
     id: "user-peer",
+    sessionId: "user-peer",
     name: "Guest",
     isSelf: false,
     isOwner: !isOwner,
@@ -227,14 +235,27 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   // Initiate Create Room (Authoritative Backend)
   const initiateCreateRoom = useCallback(
-    async (customDurationSeconds?: number): Promise<string> => {
+    async (options?: number | CreateRoomOptions): Promise<string> => {
       playSoftClick();
-      const duration = customDurationSeconds || roomLifespan || 300;
+
+      let duration = roomLifespan || 300;
+      let payloadOptions: any = {};
+
+      if (typeof options === "number") {
+        duration = options;
+      } else if (typeof options === "object" && options !== null) {
+        duration = options.durationSeconds || duration;
+        payloadOptions = options;
+      }
+
       const currentSessionId =
         sessionId ||
         (typeof localStorage !== "undefined"
           ? localStorage.getItem("5min_session_id") || "temp"
           : "temp");
+
+      const hostName = payloadOptions.nickname || userNickname || "Host";
+      setUserNickname(hostName);
 
       try {
         const res = await fetch("/api/rooms/create", {
@@ -242,8 +263,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             sessionId: currentSessionId,
-            nickname: "Host",
+            nickname: hostName,
             durationSeconds: duration,
+            defaultMessageTtl: payloadOptions.defaultMessageTtl,
+            defaultPhotoTtl: payloadOptions.defaultPhotoTtl,
+            allowImages: payloadOptions.allowImages,
+            allowReactions: payloadOptions.allowReactions,
+            allowReplies: payloadOptions.allowReplies,
+            allowViewOnce: payloadOptions.allowViewOnce,
+            maxParticipants: payloadOptions.maxParticipants,
           }),
         });
 
@@ -272,14 +300,36 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           createdAt: createdAtMs,
           durationSeconds: actualDuration,
           expiresAt: expiresAtMs,
-          participants: [selfParticipant, peerParticipant],
+          participants: [
+            {
+              id: currentSessionId,
+              sessionId: currentSessionId,
+              name: hostName,
+              isSelf: true,
+              isOwner: true,
+              joinedAt: createdAtMs,
+              status: "online",
+            },
+          ],
           participantCount: data.participantCount || 1,
+          maxParticipants: data.maxParticipants || 2,
+          allowImages: data.allowImages ?? true,
+          allowReactions: data.allowReactions ?? true,
+          allowReplies: data.allowReplies ?? true,
+          allowViewOnce: data.allowViewOnce ?? true,
+          defaultMessageTtl: data.defaultMessageTtl,
+          defaultPhotoTtl: data.defaultPhotoTtl,
           status: "active",
+          isOwner: true,
+          creatorSessionId: currentSessionId,
         };
 
         setSession(newSession);
         setTimeRemaining(remaining || actualDuration);
         setRoomLifespan(actualDuration);
+        if (data.defaultMessageTtl) {
+          setSelectedTtl(data.defaultMessageTtl);
+        }
         setMessages([]);
         setScreen("created");
 
@@ -293,7 +343,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         return "";
       }
     },
-    [sessionId, triggerToast, roomLifespan]
+    [sessionId, triggerToast, roomLifespan, userNickname]
   );
 
   // Update Room Lifespan
@@ -326,12 +376,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sessionId: sessionId || localStorage.getItem("5min_session_id"),
+            sessionId,
             durationSeconds: seconds,
           }),
         });
       } catch {
-        // Optimistic state remains
+        // Keep optimistic state
       }
     },
     [session, sessionId]
@@ -351,7 +401,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         senderId: "system",
         senderName: "5MIN",
         isSelf: false,
-        content: "Room activated. Private channel with end-of-session auto-dissolve.",
+        content: "Room activated. Content auto-dissolves upon expiration.",
         timestamp: Date.now(),
       },
     ]);
@@ -359,7 +409,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   // Join Room (Authoritative Backend)
   const joinRoom = useCallback(
-    async (code: string): Promise<boolean> => {
+    async (code: string, nickname?: string): Promise<boolean> => {
       const formatted = code.trim().toUpperCase();
       if (!isValidRoomCodeFormat(formatted)) {
         setScreen("invalid");
@@ -373,6 +423,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           ? localStorage.getItem("5min_session_id") || "temp"
           : "temp");
 
+      const joinNickname = nickname || userNickname || "Guest";
+      setUserNickname(joinNickname);
+
       try {
         const res = await fetch("/api/rooms/join", {
           method: "POST",
@@ -380,7 +433,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({
             code: formatted,
             sessionId: currentSessionId,
-            nickname: "Guest",
+            nickname: joinNickname,
           }),
         });
 
@@ -392,8 +445,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           } else if (data.error === "ROOM_EXPIRED") {
             triggerToast("This room has already expired.", "warning");
             setScreen("expired");
+          } else if (data.error === "INVITE_REVOKED") {
+            triggerToast("This room invitation has been revoked by the owner.", "warning");
           } else if (data.error === "ROOM_FULL") {
-            triggerToast("This private room is full (max 2 participants).", "warning");
+            triggerToast(data.message || "This private room has reached maximum capacity.", "warning");
           } else {
             triggerToast(data.message || "Failed to join room.", "warning");
           }
@@ -411,46 +466,66 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           Math.floor((expiresAtMs - (Date.now() - clockSkewRef.current)) / 1000)
         );
 
-        const activeSession: RoomSession = {
+        const newSession: RoomSession = {
           roomId: data.roomId,
           roomCode: data.code,
           createdAt: createdAtMs,
-          durationSeconds: SESSION_DURATION,
+          durationSeconds: Math.floor((expiresAtMs - createdAtMs) / 1000) || 300,
           expiresAt: expiresAtMs,
-          participants: [selfParticipant, peerParticipant],
+          participants: [
+            {
+              id: currentSessionId,
+              sessionId: currentSessionId,
+              name: joinNickname,
+              isSelf: true,
+              isOwner: false,
+              joinedAt: Date.now(),
+              status: "online",
+            },
+          ],
           participantCount: data.participantCount || 2,
+          maxParticipants: data.maxParticipants || 2,
+          allowImages: data.allowImages ?? true,
+          allowReactions: data.allowReactions ?? true,
+          allowReplies: data.allowReplies ?? true,
+          allowViewOnce: data.allowViewOnce ?? true,
+          defaultMessageTtl: data.defaultMessageTtl,
+          defaultPhotoTtl: data.defaultPhotoTtl,
           status: "active",
+          isOwner: false,
         };
 
-        setSession(activeSession);
-        setTimeRemaining(remaining || SESSION_DURATION);
+        setSession(newSession);
+        setTimeRemaining(remaining);
+        if (data.defaultMessageTtl) {
+          setSelectedTtl(data.defaultMessageTtl);
+        }
         setMessages([
           {
             id: `sys-${Date.now()}`,
             senderId: "system",
             senderName: "5MIN",
             isSelf: false,
-            content: `Connected to room ${formatted}. Session active.`,
+            content: `Connected as ${joinNickname}. Private channel with end-of-session auto-dissolve.`,
             timestamp: Date.now(),
           },
         ]);
         setScreen("chat");
-        triggerToast(`Connected to room ${formatted}`, "success");
 
         if (typeof sessionStorage !== "undefined") {
-          sessionStorage.setItem("5min_active_room", formatted);
+          sessionStorage.setItem("5min_active_room", data.code);
         }
 
         return true;
       } catch {
-        triggerToast("Network error. Please try again.", "warning");
+        triggerToast("Failed to connect to room server.", "warning");
         return false;
       }
     },
-    [sessionId, triggerToast]
+    [sessionId, userNickname, triggerToast]
   );
 
-  // Send Message with Image Compression, View-Once & Per-Message TTL
+  // Send Message (Authoritative Backend)
   const sendMessage = useCallback(
     async (
       content: string,
@@ -458,47 +533,49 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       imageFile?: File,
       isViewOnce?: boolean
     ) => {
-      const trimmed = content.trim();
-      if (!trimmed && !imageFile) return;
       if (!session) return;
+      if (!content.trim() && !imageFile) return;
 
-      const currentSessionId = sessionId || "user-self";
-      const optimisticId = `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      const messageExpiresAt = Date.now() + selectedTtl * 1000;
+      const tempId = `temp-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const serverEstimatedTime = Date.now() - clockSkewRef.current;
+      const ttlSec = selectedTtl || 300;
+      const expiresAt = serverEstimatedTime + ttlSec * 1000;
 
-      let previewUrl: string | undefined;
-      let finalImageUrl: string | undefined;
-      let finalImagePath: string | undefined;
-
-      // Handle Image Compression & Optimistic State
+      let optimisticImageUrl: string | null = null;
       if (imageFile) {
-        try {
+        optimisticImageUrl = URL.createObjectURL(imageFile);
+      }
+
+      // Optimistic message entry
+      const optimisticMessage: Message = {
+        id: tempId,
+        senderId: sessionId || "temp",
+        senderName: userNickname || "You",
+        isSelf: true,
+        content: content.trim(),
+        imageUrl: optimisticImageUrl,
+        isViewOnce: Boolean(isViewOnce),
+        ttlSeconds: ttlSec,
+        expiresAt: expiresAt,
+        deliveryStatus: "sending",
+        timestamp: serverEstimatedTime,
+        replyTo: replyTo || null,
+      };
+
+      setMessages((prev) => [...prev, optimisticMessage]);
+      playSendMessageSound();
+
+      try {
+        let uploadedImageUrl = null;
+        let uploadedImagePath = null;
+
+        // 1. Upload photo if present
+        if (imageFile) {
           const compressed = await compressImage(imageFile);
-          previewUrl = compressed.previewUrl;
 
-          const optimisticMessage: Message = {
-            id: optimisticId,
-            senderId: currentSessionId,
-            senderName: "You",
-            isSelf: true,
-            content: trimmed,
-            imageUrl: previewUrl,
-            isViewOnce: Boolean(isViewOnce),
-            expiresAt: messageExpiresAt,
-            ttlSeconds: selectedTtl,
-            deliveryStatus: "sending",
-            uploadProgress: 35,
-            timestamp: Date.now(),
-            replyTo,
-          };
-
-          setMessages((prev) => [...prev, optimisticMessage]);
-          playSendMessageSound();
-
-          // Upload image to backend
           const formData = new FormData();
           formData.append("file", compressed.file);
-          formData.append("sessionId", currentSessionId);
+          formData.append("sessionId", sessionId || "temp");
 
           const uploadRes = await fetch(`/api/rooms/${session.roomCode}/upload`, {
             method: "POST",
@@ -507,179 +584,189 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
           const uploadData = await uploadRes.json();
           if (!uploadData.success) {
-            triggerToast(uploadData.message || "Image upload failed.", "warning");
             setMessages((prev) =>
-              prev.map((m) =>
-                m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
-              )
+              prev.map((m) => (m.id === tempId ? { ...m, deliveryStatus: "failed" } : m))
             );
+            triggerToast(uploadData.message || "Failed to upload image.", "warning");
             return;
           }
 
-          finalImageUrl = uploadData.imageUrl;
-          finalImagePath = uploadData.imagePath;
-
-          // Update progress
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === optimisticId
-                ? { ...m, uploadProgress: 100, imageUrl: finalImageUrl, imagePath: finalImagePath }
-                : m
-            )
-          );
-        } catch (err: any) {
-          triggerToast(err.message || "Failed to process image.", "warning");
-          return;
+          uploadedImageUrl = uploadData.imageUrl;
+          uploadedImagePath = uploadData.imagePath;
         }
-      } else {
-        // Plain text message
-        const optimisticMessage: Message = {
-          id: optimisticId,
-          senderId: currentSessionId,
-          senderName: "You",
-          isSelf: true,
-          content: trimmed,
-          expiresAt: messageExpiresAt,
-          ttlSeconds: selectedTtl,
-          deliveryStatus: "sending",
-          timestamp: Date.now(),
-          replyTo,
-        };
 
-        setMessages((prev) => [...prev, optimisticMessage]);
-        playSendMessageSound();
-      }
-
-      // Post message metadata to backend
-      try {
+        // 2. Post message to backend
         const res = await fetch(`/api/rooms/${session.roomCode}/message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sessionId: currentSessionId,
-            senderName: "You",
-            content: trimmed,
-            imageUrl: finalImageUrl,
-            imagePath: finalImagePath,
+            sessionId: sessionId || "temp",
+            senderName: userNickname || "You",
+            content: content.trim(),
+            imageUrl: uploadedImageUrl,
+            imagePath: uploadedImagePath,
             isViewOnce: Boolean(isViewOnce),
-            ttlSeconds: selectedTtl,
-            replyTo,
+            ttlSeconds: ttlSec,
+            replyTo: replyTo || null,
           }),
         });
 
         const data = await res.json();
         if (!data.success) {
-          if (data.error === "ROOM_EXPIRED") {
-            triggerToast("Room has expired.", "warning");
-            setScreen("expired");
-          } else {
-            triggerToast(data.message || "Failed to send message.", "warning");
-          }
           setMessages((prev) =>
-            prev.map((m) =>
-              m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
-            )
+            prev.map((m) => (m.id === tempId ? { ...m, deliveryStatus: "failed" } : m))
           );
+          triggerToast(data.message || "Message failed to send.", "warning");
           return;
         }
 
-        // Successfully sent
+        // Update optimistic message with authoritative backend record
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === optimisticId
+            m.id === tempId
               ? {
                   ...m,
-                  id: data.message?.id || optimisticId,
+                  id: data.message.id,
                   deliveryStatus: "sent",
-                  expiresAt: data.message?.expiresAt
+                  imageUrl: data.message.imageUrl || m.imageUrl,
+                  imagePath: data.message.imagePath || m.imagePath,
+                  expiresAt: data.message.expiresAt
                     ? new Date(data.message.expiresAt).getTime()
-                    : messageExpiresAt,
+                    : m.expiresAt,
                 }
               : m
           )
         );
-
-        // Offline mock response fallback
-        if (data.mode === "offline_mock") {
-          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-          if (replyTimeoutRef.current) clearTimeout(replyTimeoutRef.current);
-
-          const typingDelay = 1000 + Math.random() * 800;
-          typingTimeoutRef.current = setTimeout(() => {
-            setIsTyping(true);
-
-            const responseDelay = 1500 + Math.random() * 900;
-            replyTimeoutRef.current = setTimeout(() => {
-              setIsTyping(false);
-
-              const responseText =
-                INITIAL_PEER_RESPONSES[
-                  peerResponseIndex.current % INITIAL_PEER_RESPONSES.length
-                ];
-              peerResponseIndex.current += 1;
-
-              const peerMessage: Message = {
-                id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-                senderId: "user-peer",
-                senderName: "Guest",
-                isSelf: false,
-                content: responseText,
-                expiresAt: Date.now() + selectedTtl * 1000,
-                ttlSeconds: selectedTtl,
-                deliveryStatus: "delivered",
-                timestamp: Date.now(),
-              };
-
-              setMessages((prev) => [...prev, peerMessage]);
-              playReceiveMessageSound();
-            }, responseDelay);
-          }, typingDelay);
-        }
       } catch {
-        triggerToast("Failed to send message.", "warning");
         setMessages((prev) =>
-          prev.map((m) =>
-            m.id === optimisticId ? { ...m, deliveryStatus: "failed" } : m
-          )
+          prev.map((m) => (m.id === tempId ? { ...m, deliveryStatus: "failed" } : m))
         );
       }
     },
-    [session, sessionId, selectedTtl, triggerToast]
+    [session, sessionId, selectedTtl, userNickname, triggerToast]
   );
 
-  // Retry a failed message
+  // Retry sending failed message
   const retrySendMessage = useCallback(
     async (messageId: string) => {
       const msg = messages.find((m) => m.id === messageId);
-      if (!msg) return;
+      if (!msg || !session) return;
+
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, deliveryStatus: "sending" } : m))
+      );
+
+      try {
+        const res = await fetch(`/api/rooms/${session.roomCode}/message`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: sessionId || "temp",
+            senderName: userNickname || "You",
+            content: msg.content,
+            imageUrl: msg.imageUrl,
+            imagePath: msg.imagePath,
+            isViewOnce: msg.isViewOnce,
+            ttlSeconds: msg.ttlSeconds,
+            replyTo: msg.replyTo,
+          }),
+        });
+
+        const data = await res.json();
+        if (data.success) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === messageId
+                ? {
+                    ...m,
+                    id: data.message.id,
+                    deliveryStatus: "sent",
+                  }
+                : m
+            )
+          );
+        } else {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === messageId ? { ...m, deliveryStatus: "failed" } : m))
+          );
+        }
+      } catch {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, deliveryStatus: "failed" } : m))
+        );
+      }
+    },
+    [messages, session, sessionId, userNickname]
+  );
+
+  // Delete message permanently
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!session) return;
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+
+      try {
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current.send({
+            type: "broadcast",
+            event: "message_deleted",
+            payload: { messageId },
+          });
+        }
+        await fetch(`/api/rooms/${session.roomCode}/message/${messageId}`, {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: sessionId || "temp" }),
+        });
+        triggerToast("Message deleted", "info");
+      } catch {
+        // Deletion optimistic
+      }
+    },
+    [session, sessionId, triggerToast]
+  );
+
+  // Mark View-Once Photo Opened & Burned
+  const markViewOnceOpened = useCallback(
+    async (messageId: string) => {
+      if (!session) return;
 
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === messageId ? { ...m, deliveryStatus: "sending" } : m
+          m.id === messageId
+            ? { ...m, viewedAt: Date.now(), imageUrl: null, content: "[Photo Disappeared]" }
+            : m
         )
       );
 
-      await sendMessage(msg.content, msg.replyTo);
-    },
-    [messages, sendMessage]
-  );
-
-  // Broadcast typing indicator
-  const broadcastTyping = useCallback(
-    (typing: boolean) => {
-      if (!session || !realtimeChannelRef.current) return;
-      realtimeChannelRef.current.send({
-        type: "broadcast",
-        event: "typing",
-        payload: { sessionId, isTyping: typing },
-      });
+      try {
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current.send({
+            type: "broadcast",
+            event: "view_once_opened",
+            payload: { messageId },
+          });
+        }
+        await fetch(`/api/rooms/${session.roomCode}/view-once`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId: sessionId || "temp",
+            messageId,
+          }),
+        });
+      } catch {
+        // Burn state preserved locally
+      }
     },
     [session, sessionId]
   );
 
-  // Add Reaction
+  // Add / Toggle Reaction
   const addReaction = useCallback(
     (messageId: string, emoji: string) => {
+      let updatedReactions: any[] = [];
+
       setMessages((prev) =>
         prev.map((msg) => {
           if (msg.id !== messageId) return msg;
@@ -687,7 +774,6 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           const currentReactions = msg.reactions || [];
           const existingIdx = currentReactions.findIndex((r) => r.emoji === emoji);
 
-          let updatedReactions;
           if (existingIdx >= 0) {
             const existing = currentReactions[existingIdx];
             const hasUser = existing.users.includes(sessionId || "user-self");
@@ -728,10 +814,54 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           };
         })
       );
-      playSoftClick();
+
+      if (session) {
+        fetch(`/api/rooms/${session.roomCode}/reaction`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, messageId, emoji }),
+        }).catch(() => {});
+
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current.send({
+            type: "broadcast",
+            event: "reaction_updated",
+            payload: { messageId, reactions: updatedReactions },
+          });
+        }
+      }
     },
-    [sessionId]
+    [sessionId, session]
   );
+
+  // Broadcast Typing Indicator
+  const broadcastTyping = useCallback(
+    (typing: boolean) => {
+      if (!session || !realtimeChannelRef.current) return;
+      try {
+        realtimeChannelRef.current.send({
+          type: "broadcast",
+          event: "typing",
+          payload: { sessionId, isTyping: typing },
+        });
+      } catch {
+        // Ignore broadcast failure
+      }
+    },
+    [session, sessionId]
+  );
+
+  // Mark Messages as Seen
+  const markMessagesAsSeen = useCallback(() => {
+    if (!session || screen !== "chat" || !realtimeChannelRef.current) return;
+    try {
+      realtimeChannelRef.current.send({
+        type: "broadcast",
+        event: "messages_seen",
+        payload: { seenBySessionId: sessionId },
+      });
+    } catch {}
+  }, [session, screen, sessionId]);
 
   // Leave room
   const leaveRoom = useCallback(() => {
@@ -767,72 +897,74 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   // Create another room
   const createAnotherRoom = useCallback(() => {
     cleanupRealtime();
-    initiateCreateRoom();
-  }, [cleanupRealtime, initiateCreateRoom]);
+    setScreen("create");
+  }, [cleanupRealtime]);
 
   // Copy Invite Link
   const copyInviteLink = useCallback(async () => {
     if (!session) return;
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     const inviteUrl = `${origin}/?join=${session.roomCode}`;
-    await copyToClipboard(inviteUrl, "Invite link copied to clipboard");
+    await copyToClipboard(inviteUrl, "Direct invite link copied to clipboard");
   }, [session, copyToClipboard]);
 
-  // Delete own message
-  const deleteMessage = useCallback(
-    async (messageId: string) => {
-      if (!session) return;
-      setMessages((prev) => prev.filter((m) => m.id !== messageId));
-      if (realtimeChannelRef.current) {
-        realtimeChannelRef.current.send({
-          type: "broadcast",
-          event: "message_deleted",
-          payload: { messageId },
+  // Host Kick Participant
+  const kickParticipant = useCallback(
+    async (targetSessionId: string) => {
+      if (!session || !isOwner) return;
+      try {
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current.send({
+            type: "broadcast",
+            event: "participant_kicked",
+            payload: { targetSessionId },
+          });
+        }
+        await fetch(`/api/rooms/${session.roomCode}/kick`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ownerSessionId: sessionId,
+            targetSessionId,
+          }),
         });
+        setParticipants((prev) => prev.filter((p) => p.sessionId !== targetSessionId));
+        triggerToast("Participant removed from room.", "info");
+      } catch {
+        triggerToast("Failed to remove participant.", "warning");
       }
-      await fetch(
-        `/api/rooms/${session.roomCode}/message/${messageId}?sessionId=${sessionId || "temp"}`,
-        { method: "DELETE" }
-      ).catch(() => {});
-      triggerToast("Message deleted.", "info");
     },
-    [session, sessionId, triggerToast]
+    [session, isOwner, sessionId, triggerToast]
   );
 
-  // Mark View-Once Opened
-  const markViewOnceOpened = useCallback(
-    async (messageId: string) => {
-      if (!session) return;
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === messageId
-            ? { ...m, viewedAt: Date.now(), imageUrl: null, content: "[Photo Disappeared]" }
-            : m
-        )
-      );
-      if (realtimeChannelRef.current) {
-        realtimeChannelRef.current.send({
-          type: "broadcast",
-          event: "view_once_opened",
-          payload: { messageId },
-        });
-      }
-      await fetch(`/api/rooms/${session.roomCode}/view-once`, {
-        method: "POST",
+  // Host Revoke Invite Code
+  const revokeInvite = useCallback(async () => {
+    if (!session || !isOwner) return;
+    try {
+      await fetch(`/api/rooms/${session.roomCode}/settings`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messageId, sessionId: sessionId || "temp" }),
-      }).catch(() => {});
-    },
-    [session, sessionId]
-  );
+        body: JSON.stringify({
+          sessionId,
+          isInviteRevoked: true,
+        }),
+      });
+      setSession((prev) => (prev ? { ...prev, isInviteRevoked: true } : null));
+      triggerToast("Room invitation revoked. New participants cannot join.", "info");
+    } catch {
+      triggerToast("Failed to revoke invite.", "warning");
+    }
+  }, [session, isOwner, sessionId, triggerToast]);
 
-  // Update Room Privacy Settings
+  // Update Room Settings
   const updateRoomSettings = useCallback(
     async (settings: {
       allowImages?: boolean;
       allowReactions?: boolean;
       allowReplies?: boolean;
+      allowViewOnce?: boolean;
       durationSeconds?: number;
+      maxParticipants?: number;
     }) => {
       if (!session) return;
       setSession((prev) => (prev ? { ...prev, ...settings } : null));
@@ -887,7 +1019,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, [session, sessionId, cleanupRealtime, triggerToast]);
 
-  // Supabase Realtime Subscription Setup (INSERT, DELETE, status updates)
+  // Supabase Realtime Subscription Setup (Presence, Broadcast, Postgres Changes)
   useEffect(() => {
     if (screen !== "chat" || !session) {
       cleanupRealtime();
@@ -901,10 +1033,42 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const channel = supabase.channel(channelName, {
       config: {
         broadcast: { ack: false },
+        presence: { key: sessionId || "user" },
       },
     });
 
-    // 1. Listen for new messages inserted in DB
+    // 1. Presence synchronization
+    channel.on("presence", { event: "sync" }, () => {
+      const state = channel.presenceState();
+      const onlineUsers: Participant[] = [];
+      Object.keys(state).forEach((key) => {
+        const pList: any = state[key];
+        if (pList && pList[0]) {
+          onlineUsers.push({
+            id: key,
+            sessionId: key,
+            name: pList[0].name || "Guest",
+            isSelf: key === sessionId,
+            isOwner: Boolean(pList[0].isOwner),
+            joinedAt: pList[0].joinedAt || Date.now(),
+            status: "online",
+          });
+        }
+      });
+      if (onlineUsers.length > 0) {
+        setParticipants(onlineUsers);
+        // Mark own sending messages as delivered if peer present
+        if (onlineUsers.length > 1) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.isSelf && m.deliveryStatus === "sent" ? { ...m, deliveryStatus: "delivered" } : m
+            )
+          );
+        }
+      }
+    });
+
+    // 2. Listen for new messages inserted in DB
     channel.on(
       "postgres_changes",
       {
@@ -942,10 +1106,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           return [...prev, incomingMessage];
         });
         playReceiveMessageSound();
+
+        // Broadcast seen receipt if user is actively on chat screen
+        channel.send({
+          type: "broadcast",
+          event: "messages_seen",
+          payload: { seenBySessionId: sessionId },
+        });
       }
     );
 
-    // 2. Listen for deleted messages (Real-time expiration)
+    // 3. Listen for deleted messages
     channel.on(
       "postgres_changes",
       {
@@ -962,14 +1133,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     );
 
-    // 3. Listen for broadcast typing indicator
+    // 4. Listen for typing indicator
     channel.on("broadcast", { event: "typing" }, (payload: any) => {
       if (payload.payload?.sessionId !== sessionId) {
         setIsTyping(Boolean(payload.payload?.isTyping));
       }
     });
 
-    // 4. Listen for emergency room destruction
+    // 5. Listen for emergency room destruction
     channel.on("broadcast", { event: "room_destroyed" }, () => {
       cleanupRealtime();
       if (typeof sessionStorage !== "undefined") {
@@ -978,10 +1149,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       setMessages([]);
       setSession(null);
       setScreen("landing");
-      triggerToast("This room was destroyed by the host.", "warning");
+      triggerToast("This room was permanently destroyed by the host.", "warning");
     });
 
-    // 5. Listen for broadcast message deletion
+    // 6. Listen for broadcast message deletion
     channel.on("broadcast", { event: "message_deleted" }, (payload: any) => {
       const { messageId } = payload.payload || {};
       if (messageId) {
@@ -989,7 +1160,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // 6. Listen for view-once opened
+    // 7. Listen for view-once opened
     channel.on("broadcast", { event: "view_once_opened" }, (payload: any) => {
       const { messageId } = payload.payload || {};
       if (messageId) {
@@ -1003,37 +1174,73 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // 7. Listen for settings updated
+    // 8. Listen for reaction updates
+    channel.on("broadcast", { event: "reaction_updated" }, (payload: any) => {
+      const { messageId, reactions } = payload.payload || {};
+      if (messageId && reactions) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, reactions } : m))
+        );
+      }
+    });
+
+    // 9. Listen for messages seen receipt
+    channel.on("broadcast", { event: "messages_seen" }, (payload: any) => {
+      const { seenBySessionId } = payload.payload || {};
+      if (seenBySessionId && seenBySessionId !== sessionId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.isSelf ? { ...m, deliveryStatus: "seen", seenAt: Date.now() } : m
+          )
+        );
+      }
+    });
+
+    // 10. Listen for participant kick
+    channel.on("broadcast", { event: "participant_kicked" }, (payload: any) => {
+      const { targetSessionId } = payload.payload || {};
+      if (targetSessionId === sessionId) {
+        cleanupRealtime();
+        if (typeof sessionStorage !== "undefined") {
+          sessionStorage.removeItem("5min_active_room");
+        }
+        setSession(null);
+        setMessages([]);
+        setScreen("landing");
+        triggerToast("You were removed from this room by the host.", "warning");
+      } else if (targetSessionId) {
+        setParticipants((prev) => prev.filter((p) => p.sessionId !== targetSessionId));
+      }
+    });
+
+    // 11. Listen for settings updated
     channel.on("broadcast", { event: "settings_updated" }, (payload: any) => {
       const newSettings = payload.payload || {};
       setSession((prev) => (prev ? { ...prev, ...newSettings } : null));
     });
 
-    // 8. Listen for room status updates (e.g. expired)
-    channel.on(
-      "postgres_changes",
-      {
-        event: "UPDATE",
-        schema: "public",
-        table: "rooms",
-        filter: session.roomId ? `id=eq.${session.roomId}` : undefined,
-      },
-      (payload: any) => {
-        if (payload.new?.status === "expired") {
-          playExpiryChime();
-          setMessages([]);
-          setScreen("expired");
-        }
+    // 12. Subscribe and track presence
+    channel.subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        setConnectionState("connected");
+        await channel.track({
+          name: userNickname,
+          isOwner,
+          joinedAt: Date.now(),
+        });
+      } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+        setConnectionState("reconnecting");
+      } else if (status === "CLOSED") {
+        setConnectionState("offline");
       }
-    );
+    });
 
-    channel.subscribe();
     realtimeChannelRef.current = channel;
 
     return () => {
       cleanupRealtime();
     };
-  }, [screen, session, sessionId, cleanupRealtime]);
+  }, [screen, session, sessionId, userNickname, isOwner, cleanupRealtime, triggerToast]);
 
   // Authoritative Room Countdown Timer System
   useEffect(() => {
@@ -1105,6 +1312,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           if (data.serverTime) {
             clockSkewRef.current = Date.now() - new Date(data.serverTime).getTime();
           }
+          if (data.participants) {
+            setParticipants(data.participants);
+          }
           if (data.messages && data.messages.length > 0) {
             setMessages((prev) => {
               const existingIds = new Set(prev.map((m) => m.id));
@@ -1154,8 +1364,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         isCriticalExpiring,
         connectionState,
         isOwner,
+        userNickname,
+        setUserNickname,
         selfParticipant,
         peerParticipant,
+        participants,
         selectedTtl,
         setSelectedTtl,
         roomLifespan,
@@ -1170,6 +1383,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         deleteMessage,
         markViewOnceOpened,
         updateRoomSettings,
+        kickParticipant,
+        revokeInvite,
+        markMessagesAsSeen,
         destroyRoom,
         copyInviteLink,
         addReaction,

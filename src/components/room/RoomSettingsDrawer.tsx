@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import {
   X,
   Shield,
@@ -11,8 +11,8 @@ import {
   Users,
   UserX,
   Trash2,
-  Check,
-  Radio,
+  Flame,
+  Ban,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Participant } from "@/types/chat";
@@ -23,16 +23,21 @@ interface RoomSettingsDrawerProps {
   roomCode: string;
   durationSeconds: number;
   participants: Participant[];
+  maxParticipants?: number;
   allowImages: boolean;
   allowReactions: boolean;
   allowReplies: boolean;
+  allowViewOnce?: boolean;
+  isInviteRevoked?: boolean;
   onUpdateSettings: (settings: {
     allowImages?: boolean;
     allowReactions?: boolean;
     allowReplies?: boolean;
+    allowViewOnce?: boolean;
     durationSeconds?: number;
   }) => Promise<void>;
   onKickParticipant?: (participantId: string) => void;
+  onRevokeInvite?: () => void;
   onDestroyRoom: () => void;
   onClose: () => void;
 }
@@ -43,11 +48,15 @@ export function RoomSettingsDrawer({
   roomCode,
   durationSeconds,
   participants,
+  maxParticipants = 2,
   allowImages,
   allowReactions,
   allowReplies,
+  allowViewOnce = true,
+  isInviteRevoked = false,
   onUpdateSettings,
   onKickParticipant,
+  onRevokeInvite,
   onDestroyRoom,
   onClose,
 }: RoomSettingsDrawerProps) {
@@ -94,15 +103,18 @@ export function RoomSettingsDrawer({
           <div className="p-6 space-y-6 flex-1">
             {/* Participants list */}
             <div>
-              <div className="flex items-center gap-2 mb-3 text-xs font-mono tracking-wider text-zinc-400 uppercase">
-                <Users className="w-3.5 h-3.5 text-zinc-500" />
-                <span>Active Participants ({participants.length}/2)</span>
+              <div className="flex items-center justify-between mb-3 text-xs font-mono tracking-wider text-zinc-400 uppercase">
+                <span className="flex items-center gap-2">
+                  <Users className="w-3.5 h-3.5 text-zinc-500" />
+                  <span>Active Participants ({participants.length}/{maxParticipants})</span>
+                </span>
+                <span className="text-[10px] text-emerald-400 font-semibold">● LIVE</span>
               </div>
 
               <div className="space-y-2">
                 {participants.map((p) => (
                   <div
-                    key={p.id}
+                    key={p.sessionId || p.id}
                     className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.07]"
                   >
                     <div className="flex items-center gap-2.5">
@@ -134,16 +146,16 @@ export function RoomSettingsDrawer({
                           )}
                         </div>
                         <span className="text-[10px] font-mono text-zinc-500">
-                          {p.status === "offline" ? "Offline" : "Active presence"}
+                          {p.status === "offline" ? "Offline" : "Connected in room"}
                         </span>
                       </div>
                     </div>
 
                     {isOwner && !p.isSelf && onKickParticipant && (
                       <button
-                        onClick={() => onKickParticipant(p.id)}
+                        onClick={() => onKickParticipant(p.sessionId || p.id)}
                         className="p-2 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded-xl transition-colors"
-                        title="Revoke access"
+                        title="Evict participant from room"
                       >
                         <UserX className="w-4 h-4" />
                       </button>
@@ -255,6 +267,38 @@ export function RoomSettingsDrawer({
                     />
                   </button>
                 </div>
+
+                {/* Allow View-Once */}
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-white/[0.03] border border-white/[0.07]">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 rounded-xl bg-white/[0.04] text-zinc-400">
+                      <Flame className="w-4 h-4 text-amber-500" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-medium text-white block">
+                        Allow View-Once Photos
+                      </span>
+                      <span className="text-[10px] font-mono text-zinc-500">
+                        Enable ephemeral auto-burning photos
+                      </span>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={!isOwner}
+                    onClick={() => onUpdateSettings({ allowViewOnce: !allowViewOnce })}
+                    className={`w-11 h-6 rounded-full transition-colors relative flex items-center p-0.5 ${
+                      allowViewOnce ? "bg-sky-500" : "bg-zinc-700"
+                    } ${!isOwner ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                        allowViewOnce ? "translate-x-5" : "translate-x-0"
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -289,6 +333,25 @@ export function RoomSettingsDrawer({
                     </button>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Revoke invite code (Owner only) */}
+            {isOwner && onRevokeInvite && (
+              <div>
+                <button
+                  type="button"
+                  disabled={isInviteRevoked}
+                  onClick={onRevokeInvite}
+                  className={`w-full py-2.5 px-3.5 rounded-xl text-xs font-mono border transition-all flex items-center justify-center gap-2 ${
+                    isInviteRevoked
+                      ? "bg-zinc-800/40 text-zinc-500 border-white/5 cursor-not-allowed"
+                      : "bg-white/[0.03] hover:bg-white/[0.08] text-amber-400 border-amber-400/20"
+                  }`}
+                >
+                  <Ban className="w-3.5 h-3.5" />
+                  <span>{isInviteRevoked ? "Invite Code Revoked" : "Revoke Invite Code (Lock Room)"}</span>
+                </button>
               </div>
             )}
           </div>

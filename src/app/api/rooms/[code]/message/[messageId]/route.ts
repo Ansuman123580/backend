@@ -6,8 +6,14 @@ export async function DELETE(
   { params }: { params: { code: string; messageId: string } }
 ) {
   try {
-    const { code, messageId } = params;
-    const sessionId = req.nextUrl.searchParams.get("sessionId");
+    const resolvedParams = await Promise.resolve(params);
+    const { code, messageId } = resolvedParams;
+
+    let sessionId = req.nextUrl.searchParams.get("sessionId");
+    if (!sessionId) {
+      const body = await req.json().catch(() => ({}));
+      sessionId = body?.sessionId;
+    }
 
     if (!code || !messageId || !sessionId) {
       return NextResponse.json(
@@ -79,10 +85,12 @@ export async function DELETE(
       messageId,
       mode: "supabase",
     });
-  } catch {
+  } catch (err) {
+    console.error("[DELETE message error]", err);
     return NextResponse.json(
       { success: false, error: "INTERNAL_ERROR", message: "Failed to delete message." },
       { status: 500 }
     );
   }
 }
+
