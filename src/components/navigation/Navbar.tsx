@@ -93,7 +93,7 @@ export function Navbar() {
 
           {/* Primary CTA */}
           <MagneticButton
-            onClick={() => initiateCreateRoom()}
+            onClick={() => goToScreen("create")}
             size="sm"
             variant="primary"
             className="gap-1.5"
@@ -158,7 +158,7 @@ export function Navbar() {
           <div className="pt-2 border-t border-white/[0.08]">
             <button
               onClick={() => {
-                initiateCreateRoom();
+                goToScreen("create");
                 setMobileMenuOpen(false);
               }}
               className="w-full py-3 rounded-xl bg-white text-zinc-950 font-medium text-sm text-center"

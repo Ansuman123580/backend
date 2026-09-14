@@ -7,7 +7,7 @@ import { ArrowRight } from "lucide-react";
 import { motion } from "framer-motion";
 
 export function CTASection() {
-  const { initiateCreateRoom } = useChat();
+  const { goToScreen } = useChat();
 
   return (
     <section className="py-28 sm:py-36 px-6 sm:px-8 relative z-10 border-t border-white/[0.05] overflow-hidden">
@@ -32,7 +32,7 @@ export function CTASection() {
           transition={{ duration: 0.7, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
         >
           <MagneticButton
-            onClick={() => initiateCreateRoom()}
+            onClick={() => goToScreen("create")}
             size="lg"
             variant="primary"
             className="group"

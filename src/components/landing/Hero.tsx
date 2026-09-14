@@ -83,7 +83,7 @@ export function Hero() {
           className="flex flex-col sm:flex-row items-center gap-4 w-full sm:w-auto"
         >
           <MagneticButton
-            onClick={() => initiateCreateRoom()}
+            onClick={() => goToScreen("create")}
             size="lg"
             variant="primary"
             className="w-full sm:w-auto group"
