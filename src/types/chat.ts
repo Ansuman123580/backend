@@ -7,12 +7,16 @@ export type ScreenState =
   | "expired"
   | "invalid";
 
+export type ConnectionState = "connected" | "reconnecting" | "offline";
+
 export interface Participant {
   id: string;
   name: string;
   isSelf: boolean;
+  isOwner?: boolean;
   avatarSeed?: string;
   joinedAt: number;
+  status?: "online" | "offline";
 }
 
 export interface MessageReaction {
@@ -30,8 +34,11 @@ export interface Message {
   isSelf: boolean;
   content: string;
   timestamp: number;
-  imageUrl?: string;
-  imagePath?: string;
+  imageUrl?: string | null;
+  imagePath?: string | null;
+  isViewOnce?: boolean;
+  viewedAt?: number | null;
+  isDeleted?: boolean;
   expiresAt?: number;
   ttlSeconds?: number;
   deliveryStatus?: DeliveryStatus;
@@ -40,7 +47,7 @@ export interface Message {
     id: string;
     senderName: string;
     content: string;
-  };
+  } | null;
   reactions?: MessageReaction[];
 }
 
@@ -48,11 +55,17 @@ export interface RoomSession {
   roomId?: string;
   roomCode: string;
   createdAt: number;
-  durationSeconds: number; // 300 seconds (5 minutes)
+  durationSeconds: number;
   expiresAt: number;
   participants: Participant[];
   participantCount?: number;
   status: "active" | "expiring" | "expired";
+  isOwner?: boolean;
+  creatorSessionId?: string;
+  allowImages?: boolean;
+  allowReactions?: boolean;
+  allowReplies?: boolean;
+  maxParticipants?: number;
 }
 
 export interface ToastMessage {
@@ -60,4 +73,3 @@ export interface ToastMessage {
   text: string;
   type?: "info" | "success" | "warning";
 }
-

@@ -16,6 +16,7 @@ import {
   Participant,
   ToastMessage,
   DeliveryStatus,
+  ConnectionState,
 } from "@/types/chat";
 import { isValidRoomCodeFormat } from "@/lib/roomCode";
 import {
@@ -50,6 +51,8 @@ interface ChatContextType {
   soundEnabled: boolean;
   isExpiringSoon: boolean;
   isCriticalExpiring: boolean;
+  connectionState: ConnectionState;
+  isOwner: boolean;
   selfParticipant: Participant;
   peerParticipant: Participant;
   selectedTtl: number;
@@ -64,9 +67,20 @@ interface ChatContextType {
   sendMessage: (
     content: string,
     replyTo?: Message["replyTo"],
-    imageFile?: File
+    imageFile?: File,
+    isViewOnce?: boolean
   ) => Promise<void>;
   retrySendMessage: (messageId: string) => Promise<void>;
+  deleteMessage: (messageId: string) => Promise<void>;
+  markViewOnceOpened: (messageId: string) => Promise<void>;
+  updateRoomSettings: (settings: {
+    allowImages?: boolean;
+    allowReactions?: boolean;
+    allowReplies?: boolean;
+    durationSeconds?: number;
+  }) => Promise<void>;
+  destroyRoom: () => Promise<void>;
+  copyInviteLink: () => Promise<void>;
   addReaction: (messageId: string, emoji: string) => void;
   copyToClipboard: (text: string, label?: string) => Promise<void>;
   leaveRoom: () => void;
@@ -91,6 +105,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [sessionId, setSessionId] = useState<string>("");
   const [selectedTtl, setSelectedTtl] = useState<number>(300); // Default 5m
   const [roomLifespan, setRoomLifespan] = useState<number>(300); // Default room lifespan 5m
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connected");
 
   // Clock skew tracking (server time vs client local time)
   const clockSkewRef = useRef<number>(0);
@@ -101,6 +116,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
   const isExpiringSoon = timeRemaining <= 60 && timeRemaining > 0;
   const isCriticalExpiring = timeRemaining <= 10 && timeRemaining > 0;
+
+  // Track browser online/offline status
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleOnline = () => setConnectionState("connected");
+    const handleOffline = () => setConnectionState("offline");
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Initialize or restore client session identifier
   useEffect(() => {
@@ -120,10 +148,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const isOwner = Boolean(session?.creatorSessionId && session.creatorSessionId === sessionId) || Boolean(session?.isOwner);
+
   const selfParticipant: Participant = {
     id: sessionId || "user-self",
     name: "You",
     isSelf: true,
+    isOwner: isOwner,
+    status: connectionState === "offline" ? "offline" : "online",
     joinedAt: session?.createdAt || Date.now(),
   };
 
@@ -131,6 +163,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     id: "user-peer",
     name: "Guest",
     isSelf: false,
+    isOwner: !isOwner,
+    status: session?.participantCount && session.participantCount > 1 ? "online" : "offline",
     joinedAt: session?.createdAt || Date.now(),
   };
 
@@ -416,12 +450,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     [sessionId, triggerToast]
   );
 
-  // Send Message with Image Compression & Per-Message TTL
+  // Send Message with Image Compression, View-Once & Per-Message TTL
   const sendMessage = useCallback(
     async (
       content: string,
       replyTo?: Message["replyTo"],
-      imageFile?: File
+      imageFile?: File,
+      isViewOnce?: boolean
     ) => {
       const trimmed = content.trim();
       if (!trimmed && !imageFile) return;
@@ -448,6 +483,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             isSelf: true,
             content: trimmed,
             imageUrl: previewUrl,
+            isViewOnce: Boolean(isViewOnce),
             expiresAt: messageExpiresAt,
             ttlSeconds: selectedTtl,
             deliveryStatus: "sending",
@@ -525,6 +561,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
             content: trimmed,
             imageUrl: finalImageUrl,
             imagePath: finalImagePath,
+            isViewOnce: Boolean(isViewOnce),
             ttlSeconds: selectedTtl,
             replyTo,
           }),
@@ -733,6 +770,123 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     initiateCreateRoom();
   }, [cleanupRealtime, initiateCreateRoom]);
 
+  // Copy Invite Link
+  const copyInviteLink = useCallback(async () => {
+    if (!session) return;
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const inviteUrl = `${origin}/?join=${session.roomCode}`;
+    await copyToClipboard(inviteUrl, "Invite link copied to clipboard");
+  }, [session, copyToClipboard]);
+
+  // Delete own message
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!session) return;
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current.send({
+          type: "broadcast",
+          event: "message_deleted",
+          payload: { messageId },
+        });
+      }
+      await fetch(
+        `/api/rooms/${session.roomCode}/message/${messageId}?sessionId=${sessionId || "temp"}`,
+        { method: "DELETE" }
+      ).catch(() => {});
+      triggerToast("Message deleted.", "info");
+    },
+    [session, sessionId, triggerToast]
+  );
+
+  // Mark View-Once Opened
+  const markViewOnceOpened = useCallback(
+    async (messageId: string) => {
+      if (!session) return;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, viewedAt: Date.now(), imageUrl: null, content: "[Photo Disappeared]" }
+            : m
+        )
+      );
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current.send({
+          type: "broadcast",
+          event: "view_once_opened",
+          payload: { messageId },
+        });
+      }
+      await fetch(`/api/rooms/${session.roomCode}/view-once`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageId, sessionId: sessionId || "temp" }),
+      }).catch(() => {});
+    },
+    [session, sessionId]
+  );
+
+  // Update Room Privacy Settings
+  const updateRoomSettings = useCallback(
+    async (settings: {
+      allowImages?: boolean;
+      allowReactions?: boolean;
+      allowReplies?: boolean;
+      durationSeconds?: number;
+    }) => {
+      if (!session) return;
+      setSession((prev) => (prev ? { ...prev, ...settings } : null));
+      if (settings.durationSeconds) {
+        updateRoomLifespan(settings.durationSeconds);
+      }
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current.send({
+          type: "broadcast",
+          event: "settings_updated",
+          payload: settings,
+        });
+      }
+      await fetch(`/api/rooms/${session.roomCode}/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId: sessionId || "temp",
+          ...settings,
+        }),
+      }).catch(() => {});
+      triggerToast("Privacy settings updated.", "success");
+    },
+    [session, sessionId, updateRoomLifespan, triggerToast]
+  );
+
+  // Emergency Destroy Room
+  const destroyRoom = useCallback(async () => {
+    if (!session) return;
+    try {
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current.send({
+          type: "broadcast",
+          event: "room_destroyed",
+          payload: { roomCode: session.roomCode },
+        });
+      }
+      await fetch(`/api/rooms/${session.roomCode}/destroy`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: sessionId || "temp" }),
+      });
+    } finally {
+      cleanupRealtime();
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.removeItem("5min_active_room");
+      }
+      setMessages([]);
+      setSession(null);
+      setScreen("landing");
+      triggerToast("Room permanently destroyed and all data purged.", "info");
+    }
+  }, [session, sessionId, cleanupRealtime, triggerToast]);
+
   // Supabase Realtime Subscription Setup (INSERT, DELETE, status updates)
   useEffect(() => {
     if (screen !== "chat" || !session) {
@@ -763,18 +917,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         const newMsg = payload.new;
         if (!newMsg) return;
 
-        const isFromSelf = newMsg.sender_session_id === sessionId;
-        if (isFromSelf) {
-          // Mark deliveryStatus as delivered
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === newMsg.id || m.content === newMsg.content
-                ? { ...m, deliveryStatus: "delivered" }
-                : m
-            )
-          );
-          return;
-        }
+        // Ignore messages sent by self
+        if (newMsg.sender_session_id === sessionId) return;
 
         const incomingMessage: Message = {
           id: newMsg.id,
@@ -784,6 +928,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           content: newMsg.content,
           imageUrl: newMsg.image_url,
           imagePath: newMsg.image_path,
+          isViewOnce: Boolean(newMsg.is_view_once),
+          viewedAt: newMsg.viewed_at ? new Date(newMsg.viewed_at).getTime() : null,
           ttlSeconds: newMsg.ttl_seconds,
           expiresAt: newMsg.expires_at ? new Date(newMsg.expires_at).getTime() : undefined,
           deliveryStatus: "delivered",
@@ -823,7 +969,47 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // 4. Listen for room status updates (e.g. expired)
+    // 4. Listen for emergency room destruction
+    channel.on("broadcast", { event: "room_destroyed" }, () => {
+      cleanupRealtime();
+      if (typeof sessionStorage !== "undefined") {
+        sessionStorage.removeItem("5min_active_room");
+      }
+      setMessages([]);
+      setSession(null);
+      setScreen("landing");
+      triggerToast("This room was destroyed by the host.", "warning");
+    });
+
+    // 5. Listen for broadcast message deletion
+    channel.on("broadcast", { event: "message_deleted" }, (payload: any) => {
+      const { messageId } = payload.payload || {};
+      if (messageId) {
+        setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      }
+    });
+
+    // 6. Listen for view-once opened
+    channel.on("broadcast", { event: "view_once_opened" }, (payload: any) => {
+      const { messageId } = payload.payload || {};
+      if (messageId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? { ...m, viewedAt: Date.now(), imageUrl: null, content: "[Photo Disappeared]" }
+              : m
+          )
+        );
+      }
+    });
+
+    // 7. Listen for settings updated
+    channel.on("broadcast", { event: "settings_updated" }, (payload: any) => {
+      const newSettings = payload.payload || {};
+      setSession((prev) => (prev ? { ...prev, ...newSettings } : null));
+    });
+
+    // 8. Listen for room status updates (e.g. expired)
     channel.on(
       "postgres_changes",
       {
@@ -941,6 +1127,19 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     };
   }, [session, screen, sessionId, cleanupRealtime]);
 
+  // URL Auto-Join detection (?join=XXXX-XX or ?code=XXXX-XX)
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const joinCode = params.get("join") || params.get("code");
+    if (joinCode && screen === "landing") {
+      const formatted = joinCode.trim().toUpperCase();
+      if (isValidRoomCodeFormat(formatted)) {
+        joinRoom(formatted);
+      }
+    }
+  }, [joinRoom, screen]);
+
   return (
     <ChatContext.Provider
       value={{
@@ -953,6 +1152,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         soundEnabled,
         isExpiringSoon,
         isCriticalExpiring,
+        connectionState,
+        isOwner,
         selfParticipant,
         peerParticipant,
         selectedTtl,
@@ -966,6 +1167,11 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         joinRoom,
         sendMessage,
         retrySendMessage,
+        deleteMessage,
+        markViewOnceOpened,
+        updateRoomSettings,
+        destroyRoom,
+        copyInviteLink,
         addReaction,
         copyToClipboard,
         leaveRoom,

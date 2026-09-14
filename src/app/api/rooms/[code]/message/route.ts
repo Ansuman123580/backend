@@ -11,7 +11,7 @@ export async function POST(
   try {
     const { code } = params;
     const body = await req.json().catch(() => ({}));
-    const { sessionId, senderName, content, replyTo, imageUrl, imagePath, ttlSeconds } = body;
+    const { sessionId, senderName, content, replyTo, imageUrl, imagePath, ttlSeconds, isViewOnce } = body;
 
     if (!sessionId || typeof sessionId !== "string") {
       return NextResponse.json(
@@ -71,6 +71,7 @@ export async function POST(
           content: trimmed,
           imageUrl: imageUrl || null,
           imagePath: imagePath || null,
+          isViewOnce: Boolean(isViewOnce),
           ttlSeconds: selectedTtl,
           replyTo: replyTo || null,
           createdAt: serverTime.toISOString(),
@@ -85,7 +86,7 @@ export async function POST(
     // 1. Fetch room & check active and expiry
     const { data: room, error: roomErr } = await supabase
       .from("rooms")
-      .select("id, status, expires_at")
+      .select("id, status, expires_at, allow_images, allow_replies")
       .eq("code", normalizedCode)
       .maybeSingle();
 
@@ -101,6 +102,7 @@ export async function POST(
             content: trimmed,
             imageUrl: imageUrl || null,
             imagePath: imagePath || null,
+            isViewOnce: Boolean(isViewOnce),
             ttlSeconds: selectedTtl,
             replyTo: replyTo || null,
             createdAt: serverTime.toISOString(),
@@ -116,11 +118,24 @@ export async function POST(
     }
 
     if (room.status === "expired" || serverTime >= new Date(room.expires_at)) {
-      // Mark as expired in DB
       await supabase.from("rooms").update({ status: "expired" }).eq("id", room.id);
       return NextResponse.json(
         { success: false, error: "ROOM_EXPIRED", message: "This room has expired." },
         { status: 410 }
+      );
+    }
+
+    if (imageUrl && room.allow_images === false) {
+      return NextResponse.json(
+        { success: false, error: "IMAGES_DISABLED", message: "The host has disabled image sharing in this room." },
+        { status: 403 }
+      );
+    }
+
+    if (replyTo && room.allow_replies === false) {
+      return NextResponse.json(
+        { success: false, error: "REPLIES_DISABLED", message: "The host has disabled replies in this room." },
+        { status: 403 }
       );
     }
 
@@ -148,9 +163,10 @@ export async function POST(
         room_id: room.id,
         sender_session_id: sessionId,
         sender_name: participant.nickname || senderName || "Guest",
-        content: trimmed || (imageUrl ? "[Photo]" : ""),
+        content: trimmed || (imageUrl ? (isViewOnce ? "[View Once Photo]" : "[Photo]") : ""),
         image_url: imageUrl || null,
         image_path: imagePath || null,
+        is_view_once: Boolean(isViewOnce),
         ttl_seconds: selectedTtl,
         reply_to: replyTo || null,
         created_at: serverTime.toISOString(),
@@ -160,7 +176,7 @@ export async function POST(
       .single();
 
     if (fullInsert.error) {
-      // Graceful fallback to base columns if migration 2 columns are not yet added in Supabase
+      // Graceful fallback to base schema
       const fallbackInsert = await supabase
         .from("messages")
         .insert({
@@ -185,6 +201,7 @@ export async function POST(
         ...fallbackInsert.data,
         image_url: imageUrl || null,
         image_path: imagePath || null,
+        is_view_once: Boolean(isViewOnce),
         ttl_seconds: selectedTtl,
         expires_at: computedExpiresAt.toISOString(),
       };
@@ -202,6 +219,7 @@ export async function POST(
         content: insertedMessage.content,
         imageUrl: insertedMessage.image_url,
         imagePath: insertedMessage.image_path,
+        isViewOnce: Boolean(insertedMessage.is_view_once),
         ttlSeconds: insertedMessage.ttl_seconds,
         replyTo: insertedMessage.reply_to,
         createdAt: insertedMessage.created_at,

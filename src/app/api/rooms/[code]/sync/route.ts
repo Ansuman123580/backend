@@ -37,7 +37,7 @@ export async function GET(
 
     const { data: room, error: roomErr } = await supabase
       .from("rooms")
-      .select("id, code, status, expires_at, participant_count")
+      .select("id, code, status, expires_at, participant_count, creator_session_id, allow_images, allow_reactions, allow_replies, max_participants")
       .eq("code", normalizedCode)
       .maybeSingle();
 
@@ -71,18 +71,18 @@ export async function GET(
       Math.floor((expiresAtDate.getTime() - serverTime.getTime()) / 1000)
     );
 
-    // Fetch recent active messages for this room that have not passed their expires_at
+    // Fetch recent active messages for this room that have not passed their expires_at and are not deleted
     let messageList: any[] = [];
     const fullMsgResult = await supabase
       .from("messages")
-      .select("id, room_id, sender_session_id, sender_name, content, image_url, image_path, ttl_seconds, reply_to, reactions, created_at, expires_at")
+      .select("id, room_id, sender_session_id, sender_name, content, image_url, image_path, is_view_once, viewed_at, is_deleted, ttl_seconds, reply_to, reactions, created_at, expires_at")
       .eq("room_id", room.id)
       .gt("expires_at", serverTime.toISOString())
       .order("created_at", { ascending: true })
       .limit(100);
 
     if (fullMsgResult.error) {
-      // Fallback to base columns if migration 2 has not run yet in Supabase
+      // Fallback to base columns if migration has not run yet in Supabase
       const baseResult = await supabase
         .from("messages")
         .select("id, room_id, sender_session_id, sender_name, content, reply_to, reactions, created_at")
@@ -91,8 +91,10 @@ export async function GET(
         .limit(100);
       messageList = baseResult.data || [];
     } else {
-      messageList = fullMsgResult.data || [];
+      messageList = (fullMsgResult.data || []).filter((m) => !m.is_deleted);
     }
+
+    const isOwner = sessionId ? room.creator_session_id === sessionId : false;
 
     return NextResponse.json({
       success: true,
@@ -103,6 +105,13 @@ export async function GET(
       expiresAt: room.expires_at,
       timeRemainingSeconds: remainingSeconds,
       participantCount: room.participant_count,
+      isOwner,
+      settings: {
+        allowImages: room.allow_images ?? true,
+        allowReactions: room.allow_reactions ?? true,
+        allowReplies: room.allow_replies ?? true,
+        maxParticipants: room.max_participants ?? 2,
+      },
       messages: messageList.map((m) => {
         const createdAtMs = new Date(m.created_at).getTime();
         const expiresAtMs = m.expires_at
@@ -116,6 +125,9 @@ export async function GET(
           content: m.content,
           imageUrl: m.image_url || null,
           imagePath: m.image_path || null,
+          isViewOnce: Boolean(m.is_view_once),
+          viewedAt: m.viewed_at ? new Date(m.viewed_at).getTime() : null,
+          isDeleted: Boolean(m.is_deleted),
           ttlSeconds: m.ttl_seconds || 300,
           expiresAt: expiresAtMs,
           timestamp: createdAtMs,

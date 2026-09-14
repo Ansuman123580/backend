@@ -2,13 +2,27 @@
 
 import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, ZoomIn, ZoomOut, ShieldAlert, Lock } from "lucide-react";
+import {
+  X,
+  ZoomIn,
+  ZoomOut,
+  ShieldAlert,
+  Lock,
+  Flame,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 
 interface LightboxModalProps {
   isOpen: boolean;
   imageUrl: string | null;
   senderName?: string;
   timestamp?: number;
+  isViewOnce?: boolean;
+  hasPrev?: boolean;
+  hasNext?: boolean;
+  onPrev?: () => void;
+  onNext?: () => void;
   onClose: () => void;
 }
 
@@ -17,27 +31,54 @@ export function LightboxModal({
   imageUrl,
   senderName = "Guest",
   timestamp,
+  isViewOnce = false,
+  hasPrev = false,
+  hasNext = false,
+  onPrev,
+  onNext,
   onClose,
 }: LightboxModalProps) {
   const [isZoomed, setIsZoomed] = useState(false);
+  const [burnSecondsRemaining, setBurnSecondsRemaining] = useState(10);
 
-  // Close on Escape key
+  // Keyboard controls: Escape, ArrowLeft, ArrowRight
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && isOpen) {
+      if (!isOpen) return;
+      if (e.key === "Escape") {
         onClose();
+      } else if (e.key === "ArrowLeft" && hasPrev && onPrev) {
+        onPrev();
+      } else if (e.key === "ArrowRight" && hasNext && onNext) {
+        onNext();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, hasPrev, hasNext, onPrev, onNext, onClose]);
 
-  // Reset zoom on open
+  // Reset zoom and start 10s countdown if view-once
   useEffect(() => {
     if (isOpen) {
       setIsZoomed(false);
+      setBurnSecondsRemaining(10);
+
+      if (isViewOnce) {
+        const interval = setInterval(() => {
+          setBurnSecondsRemaining((prev) => {
+            if (prev <= 1) {
+              clearInterval(interval);
+              onClose();
+              return 0;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+
+        return () => clearInterval(interval);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, isViewOnce, onClose]);
 
   if (!isOpen || !imageUrl) return null;
 
@@ -50,7 +91,7 @@ export function LightboxModal({
         transition={{ duration: 0.25 }}
         onClick={onClose}
         onContextMenu={(e) => e.preventDefault()}
-        className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8 bg-black/92 backdrop-blur-2xl select-none"
+        className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-8 bg-black/94 backdrop-blur-2xl select-none"
       >
         {/* Top bar controls */}
         <div
@@ -76,6 +117,14 @@ export function LightboxModal({
             </div>
           </div>
 
+          {/* View-once timer pill in top center if active */}
+          {isViewOnce && (
+            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-400 font-mono text-xs font-semibold shadow-[0_0_15px_rgba(245,158,11,0.2)]">
+              <Flame className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+              <span>BURNING IN {burnSecondsRemaining}s</span>
+            </div>
+          )}
+
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsZoomed(!isZoomed)}
@@ -94,6 +143,34 @@ export function LightboxModal({
             </button>
           </div>
         </div>
+
+        {/* Previous Image button */}
+        {hasPrev && onPrev && !isViewOnce && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onPrev();
+            }}
+            className="absolute left-6 top-1/2 -translate-y-1/2 z-30 p-3 rounded-2xl bg-black/60 hover:bg-black/90 border border-white/15 text-white backdrop-blur-md transition-all hover:scale-110"
+            title="Previous image"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+        )}
+
+        {/* Next Image button */}
+        {hasNext && onNext && !isViewOnce && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onNext();
+            }}
+            className="absolute right-6 top-1/2 -translate-y-1/2 z-30 p-3 rounded-2xl bg-black/60 hover:bg-black/90 border border-white/15 text-white backdrop-blur-md transition-all hover:scale-110"
+            title="Next image"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        )}
 
         {/* Center Image Container */}
         <motion.div
@@ -124,10 +201,13 @@ export function LightboxModal({
         {/* Privacy deterrence notice pill */}
         <div className="absolute bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/[0.04] border border-white/[0.08] text-[10px] font-mono text-zinc-400 tracking-wider">
           <ShieldAlert className="w-3 h-3 text-sky-400/80" />
-          <span>EPHEMERAL MEDIA • PROTECTED CONTENT</span>
+          <span>
+            {isViewOnce
+              ? "VIEW ONCE • WILL DISAPPEAR UPON EXIT"
+              : "EPHEMERAL MEDIA • PROTECTED CONTENT"}
+          </span>
         </div>
       </motion.div>
     </AnimatePresence>
   );
 }
-
