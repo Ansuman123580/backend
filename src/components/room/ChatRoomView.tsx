@@ -77,11 +77,16 @@ export function ChatRoomView() {
   const [copiedCode, setCopiedCode] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [holdToRevealImageId, setHoldToRevealImageId] = useState<string | null>(null);
+  const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
   const [stealthProtectionEnabled, setStealthProtectionEnabled] = useState(true);
+  const [antiScreenshotActive, setAntiScreenshotActive] = useState(true);
 
   // Release held reveal on any blur or mouseup anywhere
   useEffect(() => {
-    const handleResetHold = () => setHoldToRevealImageId(null);
+    const handleResetHold = () => {
+      setHoldToRevealImageId(null);
+      setHoveredMessageId(null);
+    };
     window.addEventListener("blur", handleResetHold);
     window.addEventListener("mouseup", handleResetHold);
     window.addEventListener("touchend", handleResetHold);
@@ -333,7 +338,28 @@ export function ChatRoomView() {
             </div>
 
             {/* Stealth Shield, Audio & Leave Actions */}
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              {/* Anti-Screenshot Master Guard Button */}
+              <button
+                onClick={() => setAntiScreenshotActive(!antiScreenshotActive)}
+                aria-label="Toggle anti-screenshot guard"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-mono transition-all border ${
+                  antiScreenshotActive
+                    ? "bg-emerald-500/10 border-emerald-500/25 text-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.15)]"
+                    : "bg-white/[0.03] border-white/10 text-zinc-500 hover:text-zinc-300"
+                }`}
+                title={
+                  antiScreenshotActive
+                    ? "Anti-Screenshot Guard Active: Messages & photos blurred until hovered/tapped"
+                    : "Anti-Screenshot Guard Off: Plain text mode"
+                }
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline text-[11px] font-semibold tracking-wider">
+                  {antiScreenshotActive ? "ANTI-CAPTURE ON" : "ANTI-CAPTURE OFF"}
+                </span>
+              </button>
+
               {/* Stealth Mode Anti-Capture Toggle */}
               <button
                 onClick={() => setStealthProtectionEnabled(!stealthProtectionEnabled)}
@@ -561,11 +587,32 @@ export function ChatRoomView() {
                         </div>
                       )}
 
-                      {/* Text content */}
+                      {/* Text content with Anti-Screenshot Protection */}
                       {msg.content && msg.content !== "[Photo]" && (
-                        <p className="px-5 py-3.5 whitespace-pre-wrap break-words">
-                          {msg.content}
-                        </p>
+                        <div
+                          onMouseEnter={() => setHoveredMessageId(msg.id)}
+                          onMouseLeave={() => setHoveredMessageId(null)}
+                          onTouchStart={() => setHoveredMessageId(msg.id)}
+                          onTouchEnd={() => setHoveredMessageId(null)}
+                          className="relative cursor-pointer select-none"
+                        >
+                          <p
+                            className={`px-5 py-3.5 whitespace-pre-wrap break-words transition-all duration-200 select-none ${
+                              antiScreenshotActive && hoveredMessageId !== msg.id
+                                ? "filter blur-[7px] opacity-25 scale-[0.98] select-none pointer-events-none"
+                                : "filter blur-0 opacity-100 scale-100"
+                            }`}
+                          >
+                            {msg.content}
+                          </p>
+                          {antiScreenshotActive && hoveredMessageId !== msg.id && (
+                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-3">
+                              <span className="text-[9px] font-mono tracking-widest text-zinc-300 bg-black/60 px-2 py-0.5 rounded-full border border-white/10 shadow-sm backdrop-blur-sm uppercase">
+                                Hover to reveal
+                              </span>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </div>
 

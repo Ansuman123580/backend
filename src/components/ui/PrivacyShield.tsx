@@ -69,7 +69,20 @@ export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
       }
     };
 
+    const handleMouseLeave = (e: MouseEvent) => {
+      if (
+        e.clientY <= 2 ||
+        e.clientX <= 2 ||
+        e.clientX >= window.innerWidth - 2 ||
+        e.clientY >= window.innerHeight - 2
+      ) {
+        setShieldReason("Cursor Left Window — Content Masked");
+        setIsMasked(true);
+      }
+    };
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    document.addEventListener("mouseleave", handleMouseLeave);
     window.addEventListener("blur", handleWindowBlur);
     window.addEventListener("focus", handleWindowFocus);
     window.addEventListener("keydown", handleKeyDown, true);
@@ -77,6 +90,7 @@ export function PrivacyShield({ enabled = true }: PrivacyShieldProps) {
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      document.removeEventListener("mouseleave", handleMouseLeave);
       window.removeEventListener("blur", handleWindowBlur);
       window.removeEventListener("focus", handleWindowFocus);
       window.removeEventListener("keydown", handleKeyDown, true);

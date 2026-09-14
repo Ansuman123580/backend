@@ -16,7 +16,7 @@ export function AntiScreenshotWatermark({
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none select-none fixed inset-0 z-0 overflow-hidden opacity-[0.03] sm:opacity-[0.045] flex flex-wrap gap-x-20 gap-y-24 -rotate-12 scale-125 justify-center items-center"
+      className="pointer-events-none select-none fixed inset-0 z-10 overflow-hidden opacity-[0.06] sm:opacity-[0.085] flex flex-wrap gap-x-16 gap-y-20 -rotate-12 scale-125 justify-center items-center"
     >
       {Array.from({ length: 40 }).map((_, i) => (
         <span
@@ -29,3 +29,4 @@ export function AntiScreenshotWatermark({
     </div>
   );
 }
+
