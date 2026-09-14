@@ -56,6 +56,8 @@ using (
 );
 
 -- 5. Enhanced cleanup function that handles expired messages and cleans up storage references
+drop function if exists public.cleanup_expired_rooms();
+
 create or replace function public.cleanup_expired_rooms()
 returns jsonb
 language plpgsql
@@ -89,3 +91,4 @@ begin
   );
 end;
 $$;
+
