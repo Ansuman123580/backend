@@ -138,30 +138,18 @@ export async function POST(
 
     const normalizedCode = code.trim().toUpperCase();
 
-    // 1. Verify active room & expiration with fallback
-    let room: any = null;
-    const { data: fullRoom, error: roomErr } = await supabase
+    // 1. Verify active room & expiration
+    const { data: room, error: roomErr } = await supabase
       .from("rooms")
-      .select("id, status, expires_at, allow_images, default_photo_ttl")
+      .select("*")
       .eq("code", normalizedCode)
       .maybeSingle();
 
-    if (roomErr || !fullRoom) {
-      const { data: baseRoom, error: baseErr } = await supabase
-        .from("rooms")
-        .select("id, status, expires_at, allow_images")
-        .eq("code", normalizedCode)
-        .maybeSingle();
-
-      if (baseErr || !baseRoom) {
-        return NextResponse.json(
-          { success: false, error: "ROOM_NOT_FOUND", message: "Room not found." },
-          { status: 404 }
-        );
-      }
-      room = baseRoom;
-    } else {
-      room = fullRoom;
+    if (roomErr || !room) {
+      return NextResponse.json(
+        { success: false, error: "ROOM_NOT_FOUND", message: "Room not found." },
+        { status: 404 }
+      );
     }
 
     if (room.status === "expired" || serverTime >= new Date(room.expires_at)) {
@@ -178,19 +166,32 @@ export async function POST(
       );
     }
 
-    // 2. Verify sender is a participant
-    const { data: participant, error: partErr } = await supabase
+    // 2. Verify sender is a participant or room creator
+    const isCreator = room.creator_session_id === sessionId;
+    const { data: participant } = await supabase
       .from("participants")
       .select("id")
       .eq("room_id", room.id)
       .eq("session_id", sessionId)
       .maybeSingle();
 
-    if (partErr || !participant) {
+    if (!participant && !isCreator) {
       return NextResponse.json(
         { success: false, error: "FORBIDDEN", message: "You are not a member of this room." },
         { status: 403 }
       );
+    }
+
+    if (isCreator && !participant) {
+      try {
+        await supabase.from("participants").insert({
+          room_id: room.id,
+          session_id: sessionId,
+          nickname: "Host",
+          joined_at: serverTime.toISOString(),
+          last_seen_at: serverTime.toISOString(),
+        });
+      } catch {}
     }
 
     // 3. Upload file to Supabase Storage with cryptographic random filename and detected extension

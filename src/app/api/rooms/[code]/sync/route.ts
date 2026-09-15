@@ -39,36 +39,26 @@ export async function GET(
 
     const normalizedCode = code.trim().toUpperCase();
 
-    let room: any = null;
-    const { data: fullRoom, error: roomErr } = await supabase
+    const { data: room, error: roomErr } = await supabase
       .from("rooms")
-      .select("id, code, status, expires_at, participant_count, creator_session_id, allow_images, allow_reactions, allow_replies, allow_view_once, max_participants, default_message_ttl, default_photo_ttl")
+      .select("*")
       .eq("code", normalizedCode)
       .maybeSingle();
 
-    if (roomErr || !fullRoom) {
-      const { data: baseRoom, error: baseErr } = await supabase
-        .from("rooms")
-        .select("id, code, status, expires_at, participant_count, creator_session_id")
-        .eq("code", normalizedCode)
-        .maybeSingle();
-
-      if (baseErr || !baseRoom) {
-        return NextResponse.json(
-          { success: false, error: "ROOM_NOT_FOUND", message: "Room not found.", dbErr: roomErr?.message || baseErr?.message },
-          { status: 404 }
-        );
-      }
-      room = baseRoom;
-    } else {
-      room = fullRoom;
+    if (roomErr || !room) {
+      return NextResponse.json(
+        { success: false, error: "ROOM_NOT_FOUND", message: "Room not found." },
+        { status: 404 }
+      );
     }
 
     const expiresAtDate = new Date(room.expires_at);
     const isExpired = room.status === "expired" || serverTime >= expiresAtDate;
 
     if (isExpired) {
-      await supabase.from("rooms").update({ status: "expired" }).eq("id", room.id);
+      try {
+        await supabase.from("rooms").update({ status: "expired" }).eq("id", room.id);
+      } catch {}
       return NextResponse.json({
         success: true,
         status: "expired",
@@ -105,26 +95,15 @@ export async function GET(
     }));
 
     // Fetch active messages that haven't expired and aren't deleted
-    let messageList: any[] = [];
-    const fullMsgResult = await supabase
+    const { data: rawMessages } = await supabase
       .from("messages")
-      .select("id, room_id, sender_session_id, sender_name, content, image_url, image_path, is_view_once, viewed_at, seen_at, delivered_at, is_deleted, ttl_seconds, reply_to, reactions, created_at, expires_at")
+      .select("*")
       .eq("room_id", room.id)
       .gt("expires_at", serverTime.toISOString())
       .order("created_at", { ascending: true })
       .limit(100);
 
-    if (fullMsgResult.error) {
-      const baseResult = await supabase
-        .from("messages")
-        .select("id, room_id, sender_session_id, sender_name, content, reply_to, reactions, created_at")
-        .eq("room_id", room.id)
-        .order("created_at", { ascending: true })
-        .limit(100);
-      messageList = baseResult.data || [];
-    } else {
-      messageList = (fullMsgResult.data || []).filter((m) => !m.is_deleted);
-    }
+    const messageList = (rawMessages || []).filter((m: any) => !m.is_deleted);
 
     // Refresh signed URLs on demand for active images
     const refreshedMessages = await Promise.all(

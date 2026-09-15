@@ -131,7 +131,8 @@ export function ChatRoomView() {
   const [holdToRevealImageId, setHoldToRevealImageId] = useState<string | null>(null);
   const [hoveredMessageId, setHoveredMessageId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
-  const [stealthProtectionEnabled, setStealthProtectionEnabled] = useState(true);
+  // Stealth protection for photos (disabled by default so photos are clearly visible)
+  const [stealthProtectionEnabled, setStealthProtectionEnabled] = useState(false);
   const [antiScreenshotActive, setAntiScreenshotActive] = useState(true);
 
   // Smart Auto-Scroll State
@@ -878,17 +879,17 @@ export function ChatRoomView() {
 
                             <img
                               src={msg.imageUrl}
-                              alt="Encrypted attachment"
+                              alt="Attached photo"
                               draggable={false}
                               className={`w-full max-h-72 sm:max-h-80 object-cover transition-all duration-300 pointer-events-none no-drag select-none ${
-                                stealthProtectionEnabled && holdToRevealImageId !== msg.id
+                                !msg.isSelf && stealthProtectionEnabled && holdToRevealImageId !== msg.id
                                   ? "filter blur-xl scale-105 brightness-50"
                                   : "filter blur-0 scale-100 brightness-100"
                               }`}
                             />
 
-                            {/* Anti-screenshot prompt */}
-                            {stealthProtectionEnabled && holdToRevealImageId !== msg.id && (
+                            {/* Anti-screenshot prompt for peer images when stealth is on */}
+                            {!msg.isSelf && stealthProtectionEnabled && holdToRevealImageId !== msg.id && (
                               <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm p-4 text-center pointer-events-none">
                                 <div className="w-10 h-10 rounded-full bg-white/10 border border-white/20 flex items-center justify-center text-white mb-2 shadow-lg">
                                   <Eye className="w-5 h-5" />
@@ -903,17 +904,20 @@ export function ChatRoomView() {
                             )}
 
                             {/* Expand button */}
-                            {(!stealthProtectionEnabled || holdToRevealImageId === msg.id) && (
+                            {(msg.isSelf || !stealthProtectionEnabled || holdToRevealImageId === msg.id) && (
                               <button
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setActiveLightboxImage({
-                                    url: msg.imageUrl!,
-                                    senderName: msg.senderName,
-                                    timestamp: msg.timestamp,
-                                    isViewOnce: false,
-                                  });
+                                  if (msg.imageUrl) {
+                                    setActiveLightboxImage({
+                                      url: msg.imageUrl,
+                                      senderName: msg.senderName,
+                                      timestamp: msg.timestamp,
+                                      isViewOnce: false,
+                                      messageId: msg.id,
+                                    });
+                                  }
                                 }}
                                 className="absolute bottom-2 right-2 px-2 py-1 rounded-lg bg-black/70 backdrop-blur-md text-[10px] font-mono text-white flex items-center gap-1 hover:bg-black/90 transition-colors shadow-lg"
                               >

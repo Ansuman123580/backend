@@ -566,6 +566,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       playSendMessageSound();
 
       try {
+        const currentSessionId =
+          sessionId ||
+          (typeof window !== "undefined" ? localStorage.getItem("5min_session_id") : null) ||
+          session.creatorSessionId ||
+          "temp";
+
         let uploadedImageUrl = null;
         let uploadedImagePath = null;
 
@@ -575,7 +581,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
           const formData = new FormData();
           formData.append("file", compressed.file);
-          formData.append("sessionId", sessionId || "temp");
+          formData.append("sessionId", currentSessionId);
 
           const uploadRes = await fetch(`/api/rooms/${session.roomCode}/upload`, {
             method: "POST",
@@ -600,7 +606,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sessionId: sessionId || "temp",
+            sessionId: currentSessionId,
             senderName: userNickname || "You",
             content: content.trim(),
             imageUrl: uploadedImageUrl,
@@ -637,10 +643,12 @@ export function ChatProvider({ children }: { children: ReactNode }) {
               : m
           )
         );
-      } catch {
+      } catch (err) {
+        console.error("[sendMessage error]", err);
         setMessages((prev) =>
           prev.map((m) => (m.id === tempId ? { ...m, deliveryStatus: "failed" } : m))
         );
+        triggerToast("Failed to send message. Please check connection.", "warning");
       }
     },
     [session, sessionId, selectedTtl, userNickname, triggerToast]
@@ -657,11 +665,17 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       );
 
       try {
+        const currentSessionId =
+          sessionId ||
+          (typeof window !== "undefined" ? localStorage.getItem("5min_session_id") : null) ||
+          session.creatorSessionId ||
+          "temp";
+
         const res = await fetch(`/api/rooms/${session.roomCode}/message`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            sessionId: sessionId || "temp",
+            sessionId: currentSessionId,
             senderName: userNickname || "You",
             content: msg.content,
             imageUrl: msg.imageUrl,

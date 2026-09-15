@@ -132,19 +132,47 @@ export async function POST(
       );
     }
 
-    // 2. Verify sender is an active participant
-    const { data: participant, error: partErr } = await supabase
+    // 2. Verify sender is an active participant or room creator
+    const isCreator = room.creator_session_id === sessionId;
+    const { data: participant } = await supabase
       .from("participants")
       .select("id, nickname")
       .eq("room_id", room.id)
       .eq("session_id", sessionId)
       .maybeSingle();
 
-    if (partErr || !participant) {
-      return NextResponse.json(
-        { success: false, error: "FORBIDDEN", message: "You are not a member of this room." },
-        { status: 403 }
-      );
+    if (!participant && !isCreator) {
+      // Auto-register session if room has capacity
+      const maxCap = room.max_participants || 2;
+      const currentCount = room.participant_count || 1;
+      if (currentCount <= maxCap) {
+        try {
+          await supabase.from("participants").insert({
+            room_id: room.id,
+            session_id: sessionId,
+            nickname: senderName || "Guest",
+            joined_at: serverTime.toISOString(),
+            last_seen_at: serverTime.toISOString(),
+          });
+        } catch {}
+      } else {
+        return NextResponse.json(
+          { success: false, error: "FORBIDDEN", message: "You are not a member of this room." },
+          { status: 403 }
+        );
+      }
+    }
+
+    if (isCreator && !participant) {
+      try {
+        await supabase.from("participants").insert({
+          room_id: room.id,
+          session_id: sessionId,
+          nickname: senderName || "Host",
+          joined_at: serverTime.toISOString(),
+          last_seen_at: serverTime.toISOString(),
+        });
+      } catch {}
     }
 
     // Calculate authoritative expires_at
@@ -171,7 +199,7 @@ export async function POST(
       .insert({
         room_id: room.id,
         sender_session_id: sessionId,
-        sender_name: participant.nickname || senderName || "Guest",
+        sender_name: participant?.nickname || senderName || (isCreator ? "Host" : "Guest"),
         content: cleanContent || (imageUrl ? (isViewOnce ? "[View Once Photo]" : "[Photo]") : ""),
         image_url: imageUrl || null,
         image_path: imagePath || null,
@@ -190,7 +218,7 @@ export async function POST(
         .insert({
           room_id: room.id,
           sender_session_id: sessionId,
-          sender_name: participant.nickname || senderName || "Guest",
+          sender_name: participant?.nickname || senderName || (isCreator ? "Host" : "Guest"),
           content: cleanContent || (imageUrl ? "[Photo]" : ""),
           image_url: imageUrl || null,
           image_path: imagePath || null,
