@@ -140,13 +140,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Initialize or restore anonymous session identity
+  // Initialize or restore anonymous session identity (isolated per browser tab)
   useEffect(() => {
     try {
-      let stored = localStorage.getItem("5min_session_id");
+      let stored = sessionStorage.getItem("5min_session_id");
       if (!stored) {
         stored = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-        localStorage.setItem("5min_session_id", stored);
+        sessionStorage.setItem("5min_session_id", stored);
       }
       setSessionId(stored);
     } catch {
@@ -233,6 +233,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+function getTabSessionId(stateSessionId?: string): string {
+  if (stateSessionId && stateSessionId.trim()) return stateSessionId;
+  if (typeof window !== "undefined") {
+    const fromSession = sessionStorage.getItem("5min_session_id");
+    if (fromSession && fromSession.trim()) return fromSession;
+    const fresh = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    sessionStorage.setItem("5min_session_id", fresh);
+    return fresh;
+  }
+  return "temp";
+}
+
   // Initiate Create Room (Authoritative Backend)
   const initiateCreateRoom = useCallback(
     async (options?: number | CreateRoomOptions): Promise<string> => {
@@ -248,11 +260,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         payloadOptions = options;
       }
 
-      const currentSessionId =
-        sessionId ||
-        (typeof localStorage !== "undefined"
-          ? localStorage.getItem("5min_session_id") || "temp"
-          : "temp");
+      const currentSessionId = getTabSessionId(sessionId);
+      setSessionId(currentSessionId);
 
       const hostName = payloadOptions.nickname || userNickname || "Host";
       setUserNickname(hostName);
@@ -417,11 +426,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
 
       playSoftClick();
-      const currentSessionId =
-        sessionId ||
-        (typeof localStorage !== "undefined"
-          ? localStorage.getItem("5min_session_id") || "temp"
-          : "temp");
+      const currentSessionId = getTabSessionId(sessionId);
+      setSessionId(currentSessionId);
 
       const joinNickname = nickname || userNickname || "Guest";
       setUserNickname(joinNickname);
@@ -643,6 +649,31 @@ export function ChatProvider({ children }: { children: ReactNode }) {
               : m
           )
         );
+
+        // Broadcast to all peers in room for instant sub-50ms delivery
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current.send({
+            type: "broadcast",
+            event: "new_message",
+            payload: {
+              message: {
+                id: data.message.id,
+                senderId: currentSessionId,
+                senderName: userNickname || "You",
+                content: content.trim(),
+                imageUrl: data.message.imageUrl || uploadedImageUrl,
+                imagePath: data.message.imagePath || uploadedImagePath,
+                isViewOnce: Boolean(isViewOnce),
+                ttlSeconds: ttlSec,
+                expiresAt: data.message.expiresAt
+                  ? new Date(data.message.expiresAt).getTime()
+                  : expiresAt,
+                timestamp: serverEstimatedTime,
+                replyTo: replyTo || null,
+              },
+            },
+          });
+        }
       } catch (err) {
         console.error("[sendMessage error]", err);
         setMessages((prev) =>
@@ -1082,7 +1113,37 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
     });
 
-    // 2. Listen for new messages inserted in DB
+    // 2. Instant peer-to-peer WebSocket message delivery (<50ms)
+    channel.on("broadcast", { event: "new_message" }, (payload: any) => {
+      const incoming = payload?.payload?.message || payload?.message;
+      if (!incoming) return;
+
+      const currentTabSessionId = sessionId || getTabSessionId();
+      const isFromSelf = incoming.senderId === currentTabSessionId;
+
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === incoming.id)) return prev;
+        return [
+          ...prev,
+          {
+            ...incoming,
+            isSelf: isFromSelf,
+            deliveryStatus: isFromSelf ? "sent" : "delivered",
+          },
+        ];
+      });
+
+      if (!isFromSelf) {
+        playReceiveMessageSound();
+        channel.send({
+          type: "broadcast",
+          event: "messages_seen",
+          payload: { seenBySessionId: currentTabSessionId },
+        });
+      }
+    });
+
+    // 3. Listen for new messages inserted in DB (authoritative persistence)
     channel.on(
       "postgres_changes",
       {
@@ -1095,38 +1156,52 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         const newMsg = payload.new;
         if (!newMsg) return;
 
-        // Ignore messages sent by self
-        if (newMsg.sender_session_id === sessionId) return;
-
-        const incomingMessage: Message = {
-          id: newMsg.id,
-          senderId: newMsg.sender_session_id,
-          senderName: newMsg.sender_name || "Guest",
-          isSelf: false,
-          content: newMsg.content,
-          imageUrl: newMsg.image_url,
-          imagePath: newMsg.image_path,
-          isViewOnce: Boolean(newMsg.is_view_once),
-          viewedAt: newMsg.viewed_at ? new Date(newMsg.viewed_at).getTime() : null,
-          ttlSeconds: newMsg.ttl_seconds,
-          expiresAt: newMsg.expires_at ? new Date(newMsg.expires_at).getTime() : undefined,
-          deliveryStatus: "delivered",
-          timestamp: new Date(newMsg.created_at).getTime(),
-          replyTo: newMsg.reply_to,
-        };
+        const currentTabSessionId = sessionId || getTabSessionId();
+        const isFromSelf = newMsg.sender_session_id === currentTabSessionId;
 
         setMessages((prev) => {
-          if (prev.some((m) => m.id === newMsg.id)) return prev;
+          // If already in state, update delivery status & authoritative URLs
+          if (prev.some((m) => m.id === newMsg.id)) {
+            return prev.map((m) =>
+              m.id === newMsg.id
+                ? {
+                    ...m,
+                    deliveryStatus: isFromSelf ? m.deliveryStatus : "delivered",
+                    imageUrl: newMsg.image_url || m.imageUrl,
+                    imagePath: newMsg.image_path || m.imagePath,
+                  }
+                : m
+            );
+          }
+
+          const incomingMessage: Message = {
+            id: newMsg.id,
+            senderId: newMsg.sender_session_id,
+            senderName: newMsg.sender_name || (isFromSelf ? "You" : "Guest"),
+            isSelf: isFromSelf,
+            content: newMsg.content,
+            imageUrl: newMsg.image_url,
+            imagePath: newMsg.image_path,
+            isViewOnce: Boolean(newMsg.is_view_once),
+            viewedAt: newMsg.viewed_at ? new Date(newMsg.viewed_at).getTime() : null,
+            ttlSeconds: newMsg.ttl_seconds,
+            expiresAt: newMsg.expires_at ? new Date(newMsg.expires_at).getTime() : undefined,
+            deliveryStatus: isFromSelf ? "sent" : "delivered",
+            timestamp: new Date(newMsg.created_at).getTime(),
+            replyTo: newMsg.reply_to,
+          };
+
           return [...prev, incomingMessage];
         });
-        playReceiveMessageSound();
 
-        // Broadcast seen receipt if user is actively on chat screen
-        channel.send({
-          type: "broadcast",
-          event: "messages_seen",
-          payload: { seenBySessionId: sessionId },
-        });
+        if (!isFromSelf) {
+          playReceiveMessageSound();
+          channel.send({
+            type: "broadcast",
+            event: "messages_seen",
+            payload: { seenBySessionId: currentTabSessionId },
+          });
+        }
       }
     );
 
